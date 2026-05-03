@@ -77,7 +77,8 @@ Options:
   --resume SESSION    Resume previous session
   --max-iter N        Max tool iterations per turn (default: 15)
   --cwd DIR           Working directory for tools
-  --system PROMPT     System prompt override
+  --system PROMPT     System prompt override (inline text)
+  --system-file FILE  Load system prompt from file (e.g. CLAUDE.md)
   --mcp URL           Connect to MCP server SSE URL (adds extra tools)
   --fallback          Use prompt-based tool calls (for models without native tool_calls)
   --context N         Context window token limit for compression (default: 32000)
@@ -110,6 +111,12 @@ Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL`)
       case '--system':
         config.systemPrompt = args[++i]
         break
+      case '--system-file': {
+        const filePath = args[++i]
+        const absPath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath)
+        config.systemPrompt = fs.readFileSync(absPath, 'utf-8')
+        break
+      }
       case '--mcp':
         config.mcpUrl = args[++i]
         break
@@ -144,6 +151,22 @@ async function main() {
     loadDotEnv(path.join(os.homedir(), '.agent-runner'))
   }
 
+  // System prompt: --system-file > --system > AGENT_SYSTEM_FILE > CLAUDE.md autodetect > AGENT_SYSTEM
+  let resolvedSystemPrompt = argConfig.systemPrompt  // already loaded from file if --system-file used
+  if (!resolvedSystemPrompt && process.env.AGENT_SYSTEM_FILE) {
+    try { resolvedSystemPrompt = fs.readFileSync(process.env.AGENT_SYSTEM_FILE, 'utf-8') } catch { /* ignore */ }
+  }
+  if (!resolvedSystemPrompt && process.env.AGENT_AUTO_CLAUDE_MD !== 'false') {
+    const claudeMd = path.join(argConfig.projectRoot ?? process.cwd(), 'CLAUDE.md')
+    if (fs.existsSync(claudeMd)) {
+      resolvedSystemPrompt = fs.readFileSync(claudeMd, 'utf-8')
+      if (!isJsonMode) process.stderr.write(`[system] Loaded CLAUDE.md from ${claudeMd}\n`)
+    }
+  }
+  if (!resolvedSystemPrompt) {
+    resolvedSystemPrompt = process.env.AGENT_SYSTEM
+  }
+
   const config: Config = {
     baseUrl: argConfig.baseUrl ?? process.env.AGENT_BASEURL ?? 'https://openrouter.ai/api/v1',
     apiKey: argConfig.apiKey ?? process.env.AGENT_API_KEY ?? '',
@@ -152,7 +175,7 @@ async function main() {
     jsonMode: argConfig.jsonMode ?? false,
     maxIterations: argConfig.maxIterations ?? parseInt(process.env.AGENT_MAX_ITER ?? '15', 10),
     projectRoot: argConfig.projectRoot ?? process.cwd(),
-    systemPrompt: argConfig.systemPrompt ?? process.env.AGENT_SYSTEM,
+    systemPrompt: resolvedSystemPrompt,
     contextTokens: argConfig.contextTokens ?? parseInt(process.env.AGENT_CONTEXT_TOKENS ?? '32000', 10),
     useFallback: argConfig.useFallback ?? (process.env.AGENT_FALLBACK === 'true'),
     mcpUrl: argConfig.mcpUrl ?? process.env.AGENT_MCP_URL
