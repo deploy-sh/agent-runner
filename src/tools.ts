@@ -136,6 +136,21 @@ export const TOOLS: Tool[] = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'spawn_agent',
+    description: 'Spawn a sub-agent to handle a focused subtask. The sub-agent runs with full tool access and returns its result. Call multiple spawn_agent in one response to run sub-agents in parallel.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Task for the sub-agent' },
+        model: { type: 'string', description: 'Model for the sub-agent (default: same as current)' },
+        cwd: { type: 'string', description: 'Working directory for sub-agent (default: current)' },
+        system: { type: 'string', description: 'System prompt for sub-agent (default: standard)' },
+        max_iterations: { type: 'number', description: 'Max tool iterations for sub-agent (default: 10)' }
+      },
+      required: ['prompt']
+    }
   }
 ]
 
@@ -330,6 +345,48 @@ export function executeTool(
         } catch (e) {
           execSync(`rm -f ${tmpFile}* 2>/dev/null`, { encoding: 'utf-8' })
           throw e
+        }
+      }
+
+      case 'spawn_agent': {
+        const agentPrompt = args.prompt as string
+        const agentModel = (args.model as string) ?? process.env.AGENT_MODEL ?? ''
+        const agentCwd = (args.cwd as string) ?? projectRoot
+        const agentSystem = args.system as string | undefined
+        const maxIter = (args.max_iterations as number) ?? 10
+
+        // Build command
+        const parts: string[] = ['agent-runner', '--json', `--max-iter ${maxIter}`]
+        if (agentModel) parts.push(`--model '${agentModel}'`)
+        if (agentCwd) parts.push(`--cwd '${agentCwd.replace(/'/g, "\\'")}'`)
+        if (agentSystem) parts.push(`--system '${agentSystem.replace(/'/g, "\\'")}'`)
+        parts.push(`'${agentPrompt.replace(/'/g, "\\'")}'`)
+
+        const output = execSync(parts.join(' '), {
+          encoding: 'utf-8',
+          timeout: 300_000,
+          env: { ...process.env },
+          cwd: agentCwd
+        })
+
+        // Parse JSON event stream, extract text + tool summary
+        const events = output.split('\n').filter(Boolean).flatMap(line => {
+          try { return [JSON.parse(line)] } catch { return [] }
+        })
+
+        const text = events
+          .filter((e: Record<string, unknown>) => e.type === 'text')
+          .map((e: Record<string, unknown>) => e.content as string)
+          .join('')
+
+        const toolsUsed = events
+          .filter((e: Record<string, unknown>) => e.type === 'tool_call')
+          .map((e: Record<string, unknown>) => `[${e.name}]`)
+          .join(' ')
+
+        return {
+          content: [text, toolsUsed ? `\nTools: ${toolsUsed}` : ''].join('').trim() || '(no output)',
+          error: false
         }
       }
 
