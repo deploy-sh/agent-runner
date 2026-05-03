@@ -53,10 +53,30 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
+      case '--version':
+      case '-v':
+        console.log('0.1.0')
+        process.exit(0)
+        break
+      case '--setup':
+        config.forceWizard = true
+        break
       case '--help':
       case '-h':
-        console.log((require('../src/main') as never) || '')
-        process.stdout.write(fs.readFileSync(__filename, 'utf-8').split('\n').slice(1, 25).join('\n'))
+        console.log(`Usage: agent-runner "prompt" [options]
+
+Options:
+  --model MODEL       LLM model (overrides AGENT_MODEL)
+  --baseurl URL       API base URL (overrides AGENT_BASEURL)
+  --json              JSON event stream mode
+  --resume SESSION    Resume previous session
+  --max-iter N        Max iterations (default: 15)
+  --cwd DIR           Working directory
+  --system PROMPT     System prompt override
+  --setup             Run setup wizard
+  --version           Show version
+
+Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL`)
         process.exit(0)
         break
       case '--model':
@@ -93,11 +113,12 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
 async function main() {
   const { prompt, config: argConfig } = parseArgs(process.argv)
 
-  // First-run wizard: triggered if no API key and not in json mode (interactive only)
+  // First-run wizard: triggered if no API key, forced --setup, or not in json mode (interactive only)
   const hasKey = !!(argConfig.apiKey ?? process.env.AGENT_API_KEY)
   const isJsonMode = argConfig.jsonMode ?? false
+  const forceWizard = argConfig.forceWizard ?? false
 
-  if (!hasKey && !isJsonMode) {
+  if (forceWizard || (!hasKey && !isJsonMode)) {
     const ok = await runWizard()
     if (!ok) process.exit(1)
     // Reload config after wizard

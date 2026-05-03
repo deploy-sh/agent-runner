@@ -7,6 +7,7 @@ export interface Config {
   maxIterations: number
   projectRoot: string
   systemPrompt?: string
+  forceWizard?: boolean
 }
 
 // JSON event types (stdout stream — compatible with aiclaw parser)
