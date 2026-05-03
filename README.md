@@ -24,6 +24,8 @@ Works with any LLM that supports function/tool calling:
 - Ollama (local models, no API key)
 - Any OpenAI-compatible endpoint
 
+Also supports models **without native tool_calls** (older Mistral, Ollama, etc.) via `--fallback` prompt-based mode.
+
 ---
 
 ## Install
@@ -126,6 +128,7 @@ Session is saved after every turn — Ctrl+C won't lose history.
 |---------|--------|
 | `/exit` | Quit and save session |
 | `/session` | Show session ID and resume command |
+| `/context` | Show token usage and context window % |
 | `/clear` | Clear conversation history |
 | `/help` | Show command list |
 
@@ -149,8 +152,20 @@ agent-runner "read package.json and bump the version" --cwd /path/to/project
 # Custom system prompt
 agent-runner "help me" --system "You are a linux sysadmin expert"
 
+# Load system prompt from file (e.g. CLAUDE.md)
+agent-runner "refactor auth module" --system-file CLAUDE.md
+
 # JSON output (for programmatic use / aiclaw integration)
 agent-runner "check disk usage" --json
+
+# Connect to MCP server
+agent-runner "search for open issues" --mcp https://mcp.example.com/sse
+
+# Fallback mode for models without tool_calls
+agent-runner "analyze logs" --fallback --model ollama/mistral
+
+# Set context window size (for compression threshold)
+agent-runner "long task" --context 32768
 ```
 
 ---
@@ -166,43 +181,118 @@ agent-runner "check disk usage" --json
 | `--max-iter N` | Max tool iterations per turn (default: 15) |
 | `--cwd DIR` | Working directory for tools (default: cwd) |
 | `--system PROMPT` | Override system prompt |
+| `--system-file FILE` | Load system prompt from file (e.g. CLAUDE.md) |
+| `--mcp URL` | Connect to MCP server via SSE URL |
+| `--fallback` | Use prompt-based tool calls for models without native tool_calls |
+| `--context N` | Context window size for compression (default: 128000) |
 | `--setup` | Re-run setup wizard |
 | `--version` | Show version |
+| `--help` | Show help |
 
 ---
 
 ## Tools
 
-7 built-in tools available to the LLM:
+12 built-in tools available to the LLM, executed in parallel when called together:
 
 | Tool | Description |
 |------|-------------|
 | `bash` | Execute shell commands (scripts, git, packages, etc.) |
+| `python_exec` | Execute Python code inline — data processing, math, JSON manipulation |
 | `read_file` | Read file contents with line numbers, supports offset/limit |
 | `write_file` | Write or append to a file |
 | `edit_file` | Targeted string replacement — more efficient than full rewrite |
 | `list_dir` | Structured directory listing with file sizes |
-| `grep` | Regex search in files, uses ripgrep or grep, returns file:line matches |
-| `http_request` | HTTP requests via curl |
+| `grep` | Regex search in files, uses ripgrep or grep |
+| `http_request` | HTTP requests (GET/POST/PUT/PATCH/DELETE) |
+| `pdf_to_text` | Extract text from PDF (requires `poppler-utils`) |
+| `youtube_transcript` | Download subtitles from YouTube (requires `yt-dlp`) |
+| `web_search` | DuckDuckGo search, returns titles + snippets |
+| `spawn_agent` | Spawn sub-agent for parallel subtasks (multi-agent orchestration) |
+
+Plus any tools exposed by a connected MCP server (prefixed with `mcp_`).
 
 ### Tool highlights
 
+**`python_exec`** — the LLM writes Python, agent runs it inline:
+```python
+import statistics, json
+data = [12, 45, 7, 89, 23]
+print(f"mean={statistics.mean(data)}, median={statistics.median(data)}")
+```
+No shell escaping issues — code goes to a temp file, stdout+stderr captured, file cleaned up.
+
 **`edit_file`** — for code edits, the LLM replaces specific strings instead of rewriting whole files. Saves tokens and avoids accidental overwrites.
 
-**`grep`** — search across a codebase without spending a bash iteration on formatting:
+**`grep`** — search across a codebase:
 ```
 grep pattern="class.*Handler" path="src/" glob="*.ts"
 → src/handlers/auth.ts:12: class AuthHandler {
   src/handlers/api.ts:8: class ApiHandler {
 ```
 
-**`list_dir`** — clean structured view:
+**`spawn_agent`** — orchestrate subtasks in parallel:
 ```
-d handlers/
-d utils/
-- main.ts (4.2K)
-- package.json (1.1K)
+spawn_agent prompt="analyze module A"
+spawn_agent prompt="analyze module B"
+spawn_agent prompt="analyze module C"
+← all three run simultaneously, results merged
 ```
+
+**MCP tools** — connect any MCP server and its tools appear automatically:
+```bash
+agent-runner "search issues" --mcp https://mcp.linear.app/sse
+# LLM can now call mcp_search_issues, mcp_create_issue, etc.
+```
+
+---
+
+## Token management
+
+agent-runner tracks token usage and auto-compresses context when it fills up:
+
+- Estimates tokens (4 chars = 1 token) across all messages
+- At **80% of context window**: summarizes old conversation, keeps 6 most recent turns
+- Compressed history replaces old messages with a single summary message
+- Tool results are cached (read_file, list_dir, grep) for 60s to avoid re-reading
+
+Check usage in REPL:
+```
+> /context
+Context: 12% used — ~112k tokens remaining
+```
+
+---
+
+## Fallback mode (models without tool_calls)
+
+For older or local models that don't support native function calling:
+
+```bash
+agent-runner "analyze this code" --fallback --model ollama/mistral:7b
+```
+
+In fallback mode, the system prompt instructs the model to output tool calls as XML:
+```xml
+<tool_call>{"name": "read_file", "arguments": {"path": "src/main.ts"}}</tool_call>
+```
+agent-runner parses these from text responses and executes them normally.
+
+---
+
+## System prompt from file (--system-file)
+
+Load any file as the system prompt — useful for project-specific context:
+
+```bash
+# Load CLAUDE.md for a project
+agent-runner "refactor auth" --system-file CLAUDE.md
+
+# Load a custom persona
+agent-runner "analyze logs" --system-file ~/.agent-runner/sysadmin-prompt.txt
+```
+
+Priority: `--system-file` > `--system` > `AGENT_SYSTEM_FILE` env > `AGENT_SYSTEM` env > built-in default.
 
 ---
 
@@ -217,6 +307,7 @@ d utils/
 | `AGENT_MODEL` | Default model | `openai/gpt-4o-mini` |
 | `AGENT_MAX_ITER` | Max iterations per turn | `15` |
 | `AGENT_SYSTEM` | System prompt override | *(built-in)* |
+| `AGENT_SYSTEM_FILE` | Path to system prompt file | *(none)* |
 
 ### Config file
 
@@ -293,11 +384,16 @@ aiclaw's `install.sh` downloads agent-runner automatically from GitHub releases.
 | `meta-llama/llama-3.3-70b-instruct` | Open source, fast |
 | `anthropic/claude-3-5-sonnet` | Complex multi-step reasoning |
 
+For local models without tool_calls, use `--fallback`:
+```bash
+agent-runner "task" --fallback --model ollama/qwen2.5:7b
+```
+
 ---
 
 ## Security
 
-- `bash` tool runs in `--cwd` directory (default: cwd of agent-runner process)
-- No sandbox by default — runs as the current user
+- `bash` and `python_exec` run as the current user — no sandbox by default
+- Tools execute in `--cwd` directory (default: cwd of agent-runner process)
 - For untrusted use: run in a container or restricted user account
 - Config file is chmod 600 (owner read only)

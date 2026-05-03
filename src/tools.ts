@@ -138,6 +138,18 @@ export const TOOLS: Tool[] = [
     }
   },
   {
+    name: 'python_exec',
+    description: 'Execute Python code inline and return stdout + stderr. Ideal for data processing, calculations, JSON manipulation, and scripting tasks. Code runs in a temporary file to handle multi-line scripts cleanly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        code: { type: 'string', description: 'Python code to execute' },
+        timeout_ms: { type: 'number', description: 'Timeout in milliseconds (default: 30000)' }
+      },
+      required: ['code']
+    }
+  },
+  {
     name: 'spawn_agent',
     description: 'Spawn a sub-agent to handle a focused subtask. The sub-agent runs with full tool access and returns its result. Call multiple spawn_agent in one response to run sub-agents in parallel.',
     parameters: {
@@ -387,6 +399,24 @@ export function executeTool(
         return {
           content: [text, toolsUsed ? `\nTools: ${toolsUsed}` : ''].join('').trim() || '(no output)',
           error: false
+        }
+      }
+
+      case 'python_exec': {
+        const code = args.code as string
+        const timeout = (args.timeout_ms as number) ?? 30000
+        const tmpFile = `/tmp/agent_py_${Date.now()}_${Math.random().toString(36).slice(2)}.py`
+        try {
+          fs.writeFileSync(tmpFile, code, 'utf-8')
+          const result = execSync(`python3 '${tmpFile}' 2>&1`, {
+            encoding: 'utf-8',
+            timeout,
+            maxBuffer: 1024 * 1024 * 4,
+            cwd: projectRoot
+          })
+          return { content: result || '(no output)', error: false }
+        } finally {
+          try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
         }
       }
 

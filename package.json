@@ -1,6 +1,6 @@
 {
   "name": "agent-runner",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Standalone agentic loop CLI — any OpenAI-compatible LLM with tool calling",
   "main": "dist/main.js",
   "bin": {
