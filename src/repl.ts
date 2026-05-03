@@ -1,6 +1,8 @@
 /**
  * agent-runner interactive REPL mode.
- * Features: streaming, tool cache, /context, auto-compression, MCP tools.
+ *
+ * Features: streaming, tool cache, /context, auto-compression, MCP tools,
+ * /model — interactive model switcher with live provider model list.
  */
 
 import * as readline from 'readline'
@@ -18,7 +20,71 @@ import {
 import { ToolCache } from './cache'
 import { MCPClient } from './mcp-client'
 
+// ─── Banner ──────────────────────────────────────────────────────────────────
+
+const BANNER = `
+╔═════════════════════════════════════╗
+║  ▄▄  ▄▀▀ ████ █  █ █▄  █          ║
+║ █  █ █▄▄ █  █ █  █ █ █ █  v0.4.2 ║
+║ ▀▄▄▀ ▀▄▄ █▄▄█ ▀▄▄▀ █  ▀█          ║
+╠═════════════════════════════════════╣
+║  © korfix.info        by l_a_n_d   ║
+╚═════════════════════════════════════╝`
+
+// ─── Model picker ─────────────────────────────────────────────────────────────
+
+interface ModelEntry {
+  id: string
+  price: string
+}
+
+/**
+ * Fetch available models from the provider's /models endpoint.
+ * Sorts free models first, then by price ascending.
+ * Filters out embeddings, guard, and audio-only models.
+ */
+async function fetchModels(config: Config): Promise<ModelEntry[]> {
+  try {
+    const res = await fetch(`${config.baseUrl}/models`, {
+      headers: { 'Authorization': `Bearer ${config.apiKey}` }
+    })
+    if (!res.ok) return []
+    const data = await res.json() as {
+      data?: Array<{ id: string; pricing?: { completion?: string | number } }>
+    }
+    const models = (data.data ?? [])
+      .filter(m =>
+        m.id &&
+        !m.id.includes('guard') &&
+        !m.id.includes('embed') &&
+        !m.id.includes('lyria') &&
+        !m.id.includes('whisper') &&
+        !m.id.includes('tts')
+      )
+      .sort((a, b) => {
+        const pa = parseFloat(String(a.pricing?.completion ?? '999'))
+        const pb = parseFloat(String(b.pricing?.completion ?? '999'))
+        return pa - pb
+      })
+      .slice(0, 40)
+    return models.map(m => {
+      const price = parseFloat(String(m.pricing?.completion ?? '0'))
+      return {
+        id: m.id,
+        price: price <= 0 ? 'free' : `$${price.toFixed(4)}/1M`
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+// ─── REPL ─────────────────────────────────────────────────────────────────────
+
 export async function runRepl(config: Config, mcpClient: MCPClient | null = null): Promise<void> {
+  // config.model may be mutated by /model command during the session
+  // eslint-disable-next-line prefer-const
+  let currentModel = config.model
   const client = createClient(config)
   const sessionId = config.sessionId ?? generateSessionId()
   const history = config.sessionId ? loadSession(config.sessionId) : []
@@ -37,17 +103,19 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     terminal: true
   })
 
-  console.log('\nagent-runner')
-  console.log(`Model  : ${config.model}`)
-  console.log(`Session: ${sessionId}`)
-  if (mcpClient) console.log(`MCP    : ${config.mcpUrl}`)
-  if (config.useFallback) console.log(`Mode   : prompt-based tool calls (fallback)`)
-  if (history.length > 0) console.log(`Loaded : ${history.length} messages from previous session`)
-  console.log('Type a message. Commands: /exit /context /clear /help\n')
+  // Banner + session info
+  console.log(BANNER)
+  console.log(`  Model  : ${currentModel}`)
+  console.log(`  Session: ${sessionId}`)
+  if (mcpClient) console.log(`  MCP    : ${config.mcpUrl}`)
+  if (config.useFallback) console.log(`  Mode   : fallback (prompt-based tools)`)
+  if (history.length > 0) console.log(`  Loaded : ${history.length} messages`)
+  console.log(`  Help   : /help\n`)
 
-  const ask = () =>
+  // Ask for one line of input
+  const ask = (prompt = '> ') =>
     new Promise<string>((resolve) => {
-      process.stdout.write('> ')
+      process.stdout.write(prompt)
       rl.once('line', resolve)
     })
 
@@ -68,6 +136,8 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     }
 
     if (!input) continue
+
+    // ── Commands ──────────────────────────────────────────────────────────────
 
     if (input === '/exit' || input === '/quit' || input === 'exit' || input === 'quit') {
       rl.close()
@@ -92,14 +162,60 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
       continue
     }
 
+    // /model [name] — list models or switch directly
+    if (input.startsWith('/model')) {
+      const arg = input.slice('/model'.length).trim()
+
+      if (arg) {
+        // Direct switch: /model qwen/qwen3-coder:free
+        config.model = arg
+        currentModel = arg
+        console.log(`Model: ${config.model}`)
+      } else {
+        // Interactive picker: fetch from provider and show numbered list
+        process.stdout.write('Fetching models...')
+        const models = await fetchModels(config)
+        if (models.length === 0) {
+          console.log('\nCould not fetch models. Try: /model <model-id>')
+        } else {
+          console.log('\n')
+          models.forEach((m, i) => {
+            const num = String(i + 1).padStart(2)
+            const id = m.id.padEnd(52)
+            const active = m.id === config.model ? ' ◀' : ''
+            console.log(`  ${num}) ${id} ${m.price}${active}`)
+          })
+          const choice = (await ask('\nNumber or model ID (Enter to cancel): ')).trim()
+          const choiceNum = parseInt(choice, 10)
+          if (!isNaN(choiceNum) && choiceNum >= 1 && choiceNum <= models.length) {
+            config.model = models[choiceNum - 1].id
+            currentModel = config.model
+            console.log(`Switched to: ${config.model}`)
+          } else if (choice && isNaN(choiceNum)) {
+            // Typed a model ID directly
+            config.model = choice
+            currentModel = config.model
+            console.log(`Switched to: ${config.model}`)
+          } else if (choice) {
+            console.log('Invalid selection')
+          }
+        }
+      }
+      continue
+    }
+
     if (input === '/help') {
       console.log('/exit          quit and save session')
       console.log('/context       show token usage')
       console.log('/session       show session ID and resume command')
       console.log('/clear         clear conversation history and cache')
+      console.log('/model         list available models and switch interactively')
+      console.log('/model <id>    switch to a specific model immediately')
       console.log('/help          this message')
       continue
     }
+
+    // ── LLM turn ─────────────────────────────────────────────────────────────
 
     messages.push({ role: 'user', content: input })
 
