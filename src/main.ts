@@ -78,7 +78,7 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
     switch (args[i]) {
       case '--version':
       case '-v':
-        console.log('0.4.2')
+        console.log('0.4.3')
         process.exit(0)
         break
       case '--setup':
