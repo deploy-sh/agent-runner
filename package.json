@@ -1,6 +1,6 @@
 {
   "name": "agent-runner",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Standalone agentic loop CLI — any OpenAI-compatible LLM with tool calling",
   "main": "dist/main.js",
   "bin": {
@@ -12,9 +12,11 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "eventsource": "^4.1.0",
     "openai": "^4.77.0"
   },
   "devDependencies": {
+    "@types/eventsource": "^1.1.15",
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   }

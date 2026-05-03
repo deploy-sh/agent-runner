@@ -2,6 +2,9 @@ import OpenAI from 'openai'
 import type { ChatCompletionMessageParam, ChatCompletionChunk } from 'openai/resources/chat/completions'
 import { Config, emit } from './types'
 import { openAITools, executeTool } from './tools'
+import { ToolCache } from './cache'
+import { totalTokens, shouldCompress, compressHistory, contextPercent } from './tokens'
+import { MCPClient } from './mcp-client'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -10,6 +13,15 @@ export const DEFAULT_SYSTEM = `You are a helpful AI assistant with access to too
 You can execute shell commands, read and write files, search in files, and make HTTP requests.
 Work in the project directory unless told otherwise.
 Be concise and practical. When using tools, explain briefly what you are doing.`
+
+// Fallback system prompt for models without native tool_calls
+const FALLBACK_SYSTEM_SUFFIX = `
+
+When you need to use a tool, output it on its own line in this exact format:
+<tool_call>{"name": "tool_name", "args": {"param": "value"}}</tool_call>
+
+Wait for the tool result before continuing. Available tools:
+`
 
 const SESSIONS_DIR = path.join(os.homedir(), '.agent-runner', 'sessions')
 
@@ -35,57 +47,125 @@ export function createClient(config: Config): OpenAI {
   return new OpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey })
 }
 
-// Accumulated tool call from streaming chunks
-interface AccToolCall {
+// Extract tool calls from text (fallback mode for models without native tool_calls)
+function extractFallbackToolCalls(text: string): Array<{ name: string; args: Record<string, unknown> }> {
+  const pattern = /<tool_call>([\s\S]*?)<\/tool_call>/g
+  const matches = [...text.matchAll(pattern)]
+  if (matches.length === 0) return []
+
+  return matches.flatMap(m => {
+    try {
+      const parsed = JSON.parse(m[1].trim())
+      if (parsed.name) return [{ name: parsed.name, args: parsed.args ?? {} }]
+    } catch { /* ignore */ }
+    return []
+  })
+}
+
+interface ToolCall {
   id: string
-  type: string
   function: { name: string; arguments: string }
+}
+
+// Execute tool calls in parallel, return results with IDs
+async function executeToolCallsParallel(
+  toolCalls: ToolCall[],
+  config: Config,
+  cache: ToolCache,
+  mcpClient: MCPClient | null
+): Promise<Array<{ id: string; name: string; content: string; error: boolean }>> {
+  return Promise.all(toolCalls.map(async (call) => {
+    const name = call.function.name
+    let args: Record<string, unknown> = {}
+    try { args = JSON.parse(call.function.arguments) } catch { /* ignore */ }
+
+    emit({ type: 'tool_call', name, args }, config.jsonMode)
+
+    // Check cache first
+    const cached = cache.get(name, args)
+    if (cached) {
+      emit({ type: 'tool_result', name, content: `[cached] ${cached.content.slice(0, 200)}`, error: cached.error }, config.jsonMode)
+      return { id: call.id, name, ...cached }
+    }
+
+    // MCP tool?
+    let result: { content: string; error: boolean }
+    if (name.startsWith('mcp_') && mcpClient) {
+      result = await mcpClient.callTool(name, args)
+    } else {
+      result = executeTool(name, args, config.projectRoot)
+    }
+
+    cache.set(name, args, result)
+    emit({ type: 'tool_result', name, content: result.content.slice(0, 200), error: result.error }, config.jsonMode)
+
+    return { id: call.id, name, ...result }
+  }))
 }
 
 /**
  * Run one agentic turn: LLM → tools → LLM → ... → final answer.
- * Returns updated messages array.
- * Streams text to stdout when not in jsonMode.
+ * Supports:
+ * - Streaming in interactive mode
+ * - Parallel tool execution
+ * - Tool result caching
+ * - MCP tools
+ * - Fallback for models without tool_calls
  */
 export async function runTurn(
   client: OpenAI,
   messages: ChatCompletionMessageParam[],
-  config: Config
+  config: Config,
+  cache: ToolCache,
+  mcpClient: MCPClient | null = null
 ): Promise<ChatCompletionMessageParam[]> {
-  const tools = openAITools()
+  const builtinTools = openAITools()
+  const mcpTools = mcpClient ? mcpClient.toOpenAITools() : []
+  const allTools = [...builtinTools, ...mcpTools]
+
   let iterations = 0
   const current = [...messages]
 
   while (iterations < config.maxIterations) {
     iterations++
 
+    // Auto-compress if context getting full
+    if (shouldCompress(current, config) && current.filter(m => m.role !== 'system').length > 8) {
+      if (!config.jsonMode) process.stdout.write('\n[Auto-compressing context...]\n')
+      const { messages: compressed, savedTokens } = await compressHistory(client, current, config)
+      current.length = 0
+      current.push(...compressed)
+      if (!config.jsonMode) process.stdout.write(`[Saved ~${savedTokens} tokens]\n\n`)
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let assistantMsg: any
 
     if (config.jsonMode) {
-      // Non-streaming: emit full text event at once (for aiclaw JSON parser)
+      // Non-streaming for JSON mode
       const response = await client.chat.completions.create({
         model: config.model,
         messages: current,
-        tools,
-        tool_choice: 'auto'
+        tools: config.useFallback ? undefined : allTools,
+        tool_choice: config.useFallback ? undefined : 'auto'
       })
       assistantMsg = response.choices[0].message
       if (assistantMsg.content) {
         emit({ type: 'text', content: assistantMsg.content }, true)
       }
     } else {
-      // Streaming: write text chunks to stdout as they arrive
-      const stream = await client.chat.completions.create({
+      // Streaming for interactive mode
+      const streamParams: Parameters<typeof client.chat.completions.create>[0] = {
         model: config.model,
         messages: current,
-        tools,
-        tool_choice: 'auto',
-        stream: true
-      }) as AsyncIterable<ChatCompletionChunk>
+        stream: true,
+        ...(config.useFallback ? {} : { tools: allTools, tool_choice: 'auto' as const })
+      }
+
+      const stream = await client.chat.completions.create(streamParams) as AsyncIterable<ChatCompletionChunk>
 
       let content = ''
-      const toolCallsAcc: AccToolCall[] = []
+      const toolCallsAcc: Array<{ id: string; type: string; function: { name: string; arguments: string } }> = []
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta
@@ -118,32 +198,31 @@ export async function runTurn(
 
     current.push(assistantMsg as ChatCompletionMessageParam)
 
-    if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
-      break
+    // Check for tool calls (native OR fallback text-based)
+    let toolCalls: ToolCall[] = assistantMsg.tool_calls ?? []
+
+    // Fallback: parse <tool_call> tags from text content
+    if (toolCalls.length === 0 && assistantMsg.content && config.useFallback) {
+      const parsed = extractFallbackToolCalls(assistantMsg.content as string)
+      if (parsed.length > 0) {
+        toolCalls = parsed.map((t, i) => ({
+          id: `fallback-${i}`,
+          function: { name: t.name, arguments: JSON.stringify(t.args) }
+        }))
+      }
     }
 
-    // Execute tool calls (shared between streaming and non-streaming)
-    for (const call of assistantMsg.tool_calls) {
-      const name = call.function.name
-      let args: Record<string, unknown> = {}
-      try {
-        args = JSON.parse(call.function.arguments)
-      } catch { /* ignore */ }
+    if (toolCalls.length === 0) break
 
-      emit({ type: 'tool_call', name, args }, config.jsonMode)
+    // Execute all tool calls in parallel
+    if (!config.jsonMode) process.stdout.write('\n')
+    const results = await executeToolCallsParallel(toolCalls, config, cache, mcpClient)
 
-      const result = executeTool(name, args, config.projectRoot)
-
-      emit({
-        type: 'tool_result',
-        name,
-        content: result.content,
-        error: result.error
-      }, config.jsonMode)
-
+    // Add tool results to messages
+    for (const result of results) {
       current.push({
         role: 'tool',
-        tool_call_id: call.id,
+        tool_call_id: result.id,
         content: result.content
       })
     }
@@ -155,21 +234,46 @@ export async function runTurn(
 /**
  * Single-shot mode: one prompt → agentic loop → save session → done event.
  */
-export async function runLoop(prompt: string, config: Config): Promise<void> {
+export async function runLoop(
+  prompt: string,
+  config: Config,
+  mcpClient: MCPClient | null = null
+): Promise<void> {
   const client = createClient(config)
   const sessionId = config.sessionId ?? generateSessionId()
   const history = config.sessionId ? loadSession(config.sessionId) : []
+  const cache = new ToolCache()
+
+  const systemContent = buildSystemPrompt(config, mcpClient)
 
   const messages: ChatCompletionMessageParam[] = [
-    { role: 'system', content: config.systemPrompt ?? DEFAULT_SYSTEM },
+    { role: 'system', content: systemContent },
     ...history,
     { role: 'user', content: prompt }
   ]
 
-  const updated = await runTurn(client, messages, config)
+  const updated = await runTurn(client, messages, config, cache, mcpClient)
 
   const toSave = updated.filter(m => m.role !== 'system')
   saveSession(sessionId, toSave)
 
   emit({ type: 'done', session_id: sessionId }, config.jsonMode)
+}
+
+export function buildSystemPrompt(config: Config, mcpClient: MCPClient | null = null): string {
+  let system = config.systemPrompt ?? DEFAULT_SYSTEM
+
+  if (config.useFallback) {
+    const toolNames = openAITools().map(t => `- ${t.function.name}: ${t.function.description}`).join('\n')
+    system += FALLBACK_SYSTEM_SUFFIX + toolNames
+  }
+
+  return system
+}
+
+export function contextStats(messages: ChatCompletionMessageParam[], config: Config): string {
+  const tokens = totalTokens(messages)
+  const pct = contextPercent(messages, config)
+  const limit = config.contextTokens ?? 32_000
+  return `~${tokens.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct}%)`
 }

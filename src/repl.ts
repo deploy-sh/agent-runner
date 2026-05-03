@@ -1,12 +1,6 @@
 /**
  * agent-runner interactive REPL mode.
- * Launched when no prompt is provided (and not --json mode).
- *
- * Features:
- * - Multi-turn conversation in one process (history in memory)
- * - Tool calls shown inline
- * - Session saved after each turn (resume with --resume SESSION_ID)
- * - /exit or Ctrl+D to quit
+ * Features: streaming, tool cache, /context, auto-compression, MCP tools.
  */
 
 import * as readline from 'readline'
@@ -18,16 +12,22 @@ import {
   generateSessionId,
   loadSession,
   saveSession,
-  DEFAULT_SYSTEM
+  buildSystemPrompt,
+  contextStats
 } from './loop'
+import { ToolCache } from './cache'
+import { MCPClient } from './mcp-client'
 
-export async function runRepl(config: Config): Promise<void> {
+export async function runRepl(config: Config, mcpClient: MCPClient | null = null): Promise<void> {
   const client = createClient(config)
   const sessionId = config.sessionId ?? generateSessionId()
   const history = config.sessionId ? loadSession(config.sessionId) : []
+  const cache = new ToolCache()
+
+  const systemContent = buildSystemPrompt(config, mcpClient)
 
   let messages: ChatCompletionMessageParam[] = [
-    { role: 'system', content: config.systemPrompt ?? DEFAULT_SYSTEM },
+    { role: 'system', content: systemContent },
     ...history
   ]
 
@@ -38,22 +38,19 @@ export async function runRepl(config: Config): Promise<void> {
   })
 
   console.log('\nagent-runner')
-  console.log(`Model : ${config.model}`)
+  console.log(`Model  : ${config.model}`)
   console.log(`Session: ${sessionId}`)
-  if (history.length > 0) {
-    console.log(`Loaded : ${history.length} messages from previous session`)
-  }
-  console.log('Type a message, /exit to quit\n')
-
-  const prompt = () => process.stdout.write('> ')
+  if (mcpClient) console.log(`MCP    : ${config.mcpUrl}`)
+  if (config.useFallback) console.log(`Mode   : prompt-based tool calls (fallback)`)
+  if (history.length > 0) console.log(`Loaded : ${history.length} messages from previous session`)
+  console.log('Type a message. Commands: /exit /context /clear /help\n')
 
   const ask = () =>
     new Promise<string>((resolve) => {
-      prompt()
+      process.stdout.write('> ')
       rl.once('line', resolve)
     })
 
-  // Handle Ctrl+D / close
   rl.on('close', () => {
     const toSave = messages.filter(m => m.role !== 'system')
     saveSession(sessionId, toSave)
@@ -77,6 +74,11 @@ export async function runRepl(config: Config): Promise<void> {
       break
     }
 
+    if (input === '/context') {
+      console.log(`Context: ${contextStats(messages, config)}`)
+      continue
+    }
+
     if (input === '/session') {
       console.log(`Session: ${sessionId}`)
       console.log(`Resume:  agent-runner --resume ${sessionId}`)
@@ -84,16 +86,18 @@ export async function runRepl(config: Config): Promise<void> {
     }
 
     if (input === '/clear') {
-      messages = [{ role: 'system', content: config.systemPrompt ?? DEFAULT_SYSTEM }]
-      console.log('History cleared')
+      messages = [{ role: 'system', content: systemContent }]
+      cache.invalidate()
+      console.log('History cleared, cache invalidated')
       continue
     }
 
     if (input === '/help') {
-      console.log('/exit    quit and save session')
-      console.log('/session show session ID and resume command')
-      console.log('/clear   clear conversation history')
-      console.log('/help    this message')
+      console.log('/exit          quit and save session')
+      console.log('/context       show token usage')
+      console.log('/session       show session ID and resume command')
+      console.log('/clear         clear conversation history and cache')
+      console.log('/help          this message')
       continue
     }
 
@@ -101,10 +105,10 @@ export async function runRepl(config: Config): Promise<void> {
 
     try {
       process.stdout.write('\n')
-      messages = await runTurn(client, messages, config)
+      messages = await runTurn(client, messages, config, cache, mcpClient)
       process.stdout.write('\n')
 
-      // Save after each turn so Ctrl+C doesn't lose history
+      // Save after each turn
       const toSave = messages.filter(m => m.role !== 'system')
       saveSession(sessionId, toSave)
     } catch (err) {

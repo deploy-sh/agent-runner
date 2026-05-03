@@ -100,6 +100,42 @@ export const TOOLS: Tool[] = [
       },
       required: ['url']
     }
+  },
+  {
+    name: 'pdf_to_text',
+    description: 'Extract text from a PDF file. Requires pdftotext (poppler-utils) installed on the system.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the PDF file' },
+        pages: { type: 'string', description: 'Page range, e.g. "1-5" or "3" (default: all)' }
+      },
+      required: ['path']
+    }
+  },
+  {
+    name: 'youtube_transcript',
+    description: 'Download transcript/subtitles from a YouTube video. Requires yt-dlp installed (pip install yt-dlp).',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'YouTube video URL or video ID' },
+        lang: { type: 'string', description: 'Subtitle language code (default: ru,en)' }
+      },
+      required: ['url']
+    }
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web using DuckDuckGo and return results with titles, URLs, and snippets.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        count: { type: 'number', description: 'Number of results to return (default: 5, max: 10)' }
+      },
+      required: ['query']
+    }
   }
 ]
 
@@ -252,6 +288,83 @@ export function executeTool(
           { encoding: 'utf-8', timeout: 30000 }
         )
         return { content: result.slice(0, 8192), error: false }
+      }
+
+      case 'pdf_to_text': {
+        const filePath = path.isAbsolute(args.path as string)
+          ? (args.path as string)
+          : path.join(projectRoot, args.path as string)
+        const pages = args.pages as string | undefined
+        const pageArgs = pages ? `-f ${pages.split('-')[0]} -l ${pages.split('-')[1] ?? pages}` : ''
+        const result = execSync(
+          `pdftotext ${pageArgs} '${filePath.replace(/'/g, "\\'")}' - 2>&1`,
+          { encoding: 'utf-8', timeout: 30000 }
+        )
+        return { content: result.slice(0, 16384) || '(empty PDF)', error: false }
+      }
+
+      case 'youtube_transcript': {
+        const videoUrl = args.url as string
+        const lang = (args.lang as string) ?? 'ru,en'
+        // yt-dlp: download auto-generated subtitles as vtt, then strip markup
+        const tmpFile = `/tmp/ytdlp_${Date.now()}`
+        try {
+          execSync(
+            `yt-dlp --skip-download --write-auto-sub --sub-lang '${lang}' --sub-format vtt -o '${tmpFile}' '${videoUrl}' 2>&1`,
+            { encoding: 'utf-8', timeout: 120_000 }
+          )
+          // Find the downloaded subtitle file
+          const vtts = execSync(`ls ${tmpFile}*.vtt 2>/dev/null`, { encoding: 'utf-8' }).trim().split('\n').filter(Boolean)
+          if (vtts.length === 0) throw new Error('No subtitle file found')
+          // Strip VTT markup and deduplicate lines
+          const raw = fs.readFileSync(vtts[0], 'utf-8')
+          const lines = raw.split('\n')
+            .filter(l => !l.startsWith('WEBVTT') && !l.match(/^\d{2}:\d{2}/) && !l.match(/^NOTE/) && l.trim())
+            .map(l => l.replace(/<[^>]+>/g, '').trim())
+            .filter(Boolean)
+          // Deduplicate consecutive identical lines
+          const deduped = lines.filter((l, i) => i === 0 || l !== lines[i - 1])
+          // Cleanup temp files
+          execSync(`rm -f ${tmpFile}*`, { encoding: 'utf-8' })
+          return { content: deduped.join('\n').slice(0, 16384), error: false }
+        } catch (e) {
+          execSync(`rm -f ${tmpFile}* 2>/dev/null`, { encoding: 'utf-8' })
+          throw e
+        }
+      }
+
+      case 'web_search': {
+        const query = args.query as string
+        const count = Math.min((args.count as number) ?? 5, 10)
+        // DuckDuckGo instant answer API
+        const encoded = encodeURIComponent(query)
+        const ddgResult = execSync(
+          `curl -s -A 'Mozilla/5.0' 'https://api.duckduckgo.com/?q=${encoded}&format=json&no_redirect=1&no_html=1&skip_disambig=1' 2>/dev/null`,
+          { encoding: 'utf-8', timeout: 15000 }
+        )
+        // Also get web results via HTML scrape fallback
+        const htmlResult = execSync(
+          `curl -s -A 'Mozilla/5.0' 'https://html.duckduckgo.com/html/?q=${encoded}' 2>/dev/null | grep -oP '(?<=class="result__snippet">)[^<]+' | head -${count}`,
+          { encoding: 'utf-8', timeout: 15000 }
+        )
+
+        let output = ''
+        try {
+          const ddg = JSON.parse(ddgResult)
+          if (ddg.Abstract) output += `Summary: ${ddg.Abstract}\nSource: ${ddg.AbstractURL}\n\n`
+          if (ddg.RelatedTopics?.length) {
+            const topics = (ddg.RelatedTopics as Array<{Text?: string; FirstURL?: string}>)
+              .filter(t => t.Text)
+              .slice(0, count)
+            output += topics.map(t => `• ${t.Text}\n  ${t.FirstURL ?? ''}`).join('\n')
+          }
+        } catch { /* ignore DDG parse errors */ }
+
+        if (!output.trim() && htmlResult.trim()) {
+          output = `Search results for "${query}":\n\n` + htmlResult.trim()
+        }
+
+        return { content: output.slice(0, 8192) || '(no results)', error: false }
       }
 
       default:

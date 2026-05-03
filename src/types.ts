@@ -8,6 +8,9 @@ export interface Config {
   projectRoot: string
   systemPrompt?: string
   forceWizard?: boolean
+  contextTokens?: number   // context window limit for compression trigger
+  useFallback?: boolean    // use prompt-based tool calls for models without native tool_calls
+  mcpUrl?: string          // MCP server SSE URL
 }
 
 // JSON event types (stdout stream — compatible with aiclaw parser)

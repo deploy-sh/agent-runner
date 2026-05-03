@@ -31,6 +31,7 @@ import { runLoop } from './loop'
 import { runRepl } from './repl'
 import { Config } from './types'
 import { runWizard } from './wizard'
+import { MCPClient } from './mcp-client'
 
 // Load .env from cwd or home
 function loadDotEnv(dir: string): void {
@@ -56,7 +57,7 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
     switch (args[i]) {
       case '--version':
       case '-v':
-        console.log('0.1.0')
+        console.log('0.4.0')
         process.exit(0)
         break
       case '--setup':
@@ -77,12 +78,15 @@ Options:
   --max-iter N        Max tool iterations per turn (default: 15)
   --cwd DIR           Working directory for tools
   --system PROMPT     System prompt override
+  --mcp URL           Connect to MCP server SSE URL (adds extra tools)
+  --fallback          Use prompt-based tool calls (for models without native tool_calls)
+  --context N         Context window token limit for compression (default: 32000)
   --setup             Run setup wizard
   --version           Show version
 
-REPL commands: /exit  /session  /clear  /help
+REPL commands: /exit  /context  /session  /clear  /help
 
-Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL`)
+Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL`)
         process.exit(0)
         break
       case '--model':
@@ -105,6 +109,15 @@ Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL`)
         break
       case '--system':
         config.systemPrompt = args[++i]
+        break
+      case '--mcp':
+        config.mcpUrl = args[++i]
+        break
+      case '--fallback':
+        config.useFallback = true
+        break
+      case '--context':
+        config.contextTokens = parseInt(args[++i], 10)
         break
       default:
         if (!args[i].startsWith('--')) {
@@ -139,7 +152,10 @@ async function main() {
     jsonMode: argConfig.jsonMode ?? false,
     maxIterations: argConfig.maxIterations ?? parseInt(process.env.AGENT_MAX_ITER ?? '15', 10),
     projectRoot: argConfig.projectRoot ?? process.cwd(),
-    systemPrompt: argConfig.systemPrompt ?? process.env.AGENT_SYSTEM
+    systemPrompt: argConfig.systemPrompt ?? process.env.AGENT_SYSTEM,
+    contextTokens: argConfig.contextTokens ?? parseInt(process.env.AGENT_CONTEXT_TOKENS ?? '32000', 10),
+    useFallback: argConfig.useFallback ?? (process.env.AGENT_FALLBACK === 'true'),
+    mcpUrl: argConfig.mcpUrl ?? process.env.AGENT_MCP_URL
   }
 
   if (!config.apiKey) {
@@ -147,9 +163,27 @@ async function main() {
     process.exit(1)
   }
 
+  // Connect to MCP server if specified
+  let mcpClient: MCPClient | null = null
+  if (config.mcpUrl) {
+    if (!config.jsonMode) process.stderr.write(`Connecting to MCP: ${config.mcpUrl}\n`)
+    try {
+      mcpClient = new MCPClient(config.mcpUrl)
+      const tools = await mcpClient.connect()
+      if (!config.jsonMode) process.stderr.write(`MCP: ${tools.length} tools loaded\n`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      process.stderr.write(`MCP connection failed: ${msg}\n`)
+      if (config.jsonMode) process.exit(1)
+      // In interactive mode, continue without MCP
+      mcpClient = null
+    }
+  }
+
   // No prompt + interactive → REPL mode
   if (!prompt && !isJsonMode) {
-    await runRepl(config)
+    await runRepl(config, mcpClient)
+    mcpClient?.disconnect()
     return
   }
 
@@ -159,7 +193,7 @@ async function main() {
   }
 
   try {
-    await runLoop(prompt, config)
+    await runLoop(prompt, config, mcpClient)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (config.jsonMode) {
@@ -168,6 +202,8 @@ async function main() {
       process.stderr.write(`Error: ${msg}\n`)
     }
     process.exit(1)
+  } finally {
+    mcpClient?.disconnect()
   }
 }
 
