@@ -26,8 +26,10 @@
 
 import * as path from 'path'
 import * as fs from 'fs'
+import * as os from 'os'
 import { runLoop } from './loop'
 import { Config } from './types'
+import { runWizard } from './wizard'
 
 // Load .env from cwd or home
 function loadDotEnv(dir: string): void {
@@ -42,7 +44,7 @@ function loadDotEnv(dir: string): void {
 }
 
 loadDotEnv(process.cwd())
-loadDotEnv(path.join(require('os').homedir(), '.agent-runner'))
+loadDotEnv(path.join(os.homedir(), '.agent-runner'))
 
 function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } {
   const args = argv.slice(2)
@@ -90,6 +92,17 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
 
 async function main() {
   const { prompt, config: argConfig } = parseArgs(process.argv)
+
+  // First-run wizard: triggered if no API key and not in json mode (interactive only)
+  const hasKey = !!(argConfig.apiKey ?? process.env.AGENT_API_KEY)
+  const isJsonMode = argConfig.jsonMode ?? false
+
+  if (!hasKey && !isJsonMode) {
+    const ok = await runWizard()
+    if (!ok) process.exit(1)
+    // Reload config after wizard
+    loadDotEnv(path.join(os.homedir(), '.agent-runner'))
+  }
 
   if (!prompt) {
     process.stderr.write('Usage: agent-runner "your prompt" [--model MODEL] [--json]\n')
