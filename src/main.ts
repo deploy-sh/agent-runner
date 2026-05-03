@@ -2,26 +2,47 @@
 /**
  * agent-runner — standalone agentic loop CLI
  *
+ * Entry point: parses CLI args → loads .env → optionally runs setup wizard →
+ * optionally connects MCP server → routes to runRepl() or runLoop().
+ *
  * Usage:
- *   agent-runner "do something" [options]
- *   agent-runner --resume SESSION_ID "next message" [options]
+ *   agent-runner                        interactive REPL (no prompt given)
+ *   agent-runner "do something"         single-shot mode
+ *   agent-runner --resume SESSION_ID    resume session in REPL or single-shot
  *   agent-runner --help
  *
  * Options:
- *   --model MODEL       LLM model name (overrides AGENT_MODEL)
- *   --baseurl URL       API base URL (overrides AGENT_BASEURL)
- *   --json              Output JSON events to stdout
- *   --resume SESSION    Resume a previous session by ID
- *   --max-iter N        Max tool-use iterations (default: 15)
- *   --cwd DIR           Working directory for tools (default: cwd)
- *   --system PROMPT     Override system prompt
+ *   --model MODEL        LLM model name (overrides AGENT_MODEL)
+ *   --baseurl URL        API base URL (overrides AGENT_BASEURL)
+ *   --json               Output newline-delimited JSON events to stdout (disables REPL/streaming)
+ *   --resume SESSION     Resume a previous session by ID (loads ~/.agent-runner/sessions/<id>.json)
+ *   --max-iter N         Max tool iterations per turn (default: 15)
+ *   --cwd DIR            Working directory for tools (default: process.cwd())
+ *   --system PROMPT      Override system prompt (inline text)
+ *   --system-file FILE   Load system prompt from a file (e.g. CLAUDE.md)
+ *   --mcp URL            Connect to an MCP server via SSE URL before starting
+ *   --fallback           Use prompt-based tool calls (for models without native tool_calls)
+ *   --context N          Context window token limit for auto-compression (default: 32000)
+ *   --setup              Force the setup wizard (reconfigure provider/key/model)
+ *   --version            Print version and exit
  *
- * Env vars (from .env or environment):
- *   AGENT_BASEURL       API base URL (e.g. https://openrouter.ai/api/v1)
- *   AGENT_API_KEY       API key
- *   AGENT_MODEL         Default model (e.g. qwen/qwen3-235b-a22b)
- *   AGENT_MAX_ITER      Default max iterations
- *   AGENT_SYSTEM        Default system prompt
+ * System prompt priority (highest to lowest):
+ *   1. --system-file FILE  (file content)
+ *   2. --system PROMPT     (inline text)
+ *   3. AGENT_SYSTEM_FILE   (env var pointing to file)
+ *   4. AGENT_SYSTEM        (env var inline text)
+ *   5. DEFAULT_SYSTEM      (built-in default in loop.ts)
+ *
+ * Env vars (from local .env or ~/.agent-runner/.env):
+ *   AGENT_BASEURL          API base URL (e.g. https://openrouter.ai/api/v1)
+ *   AGENT_API_KEY          API key for the LLM provider
+ *   AGENT_MODEL            Default model (e.g. qwen/qwen3-235b-a22b)
+ *   AGENT_MAX_ITER         Default max iterations per turn
+ *   AGENT_SYSTEM           Default system prompt (inline)
+ *   AGENT_SYSTEM_FILE      Default system prompt (path to file)
+ *   AGENT_MCP_URL          Default MCP server SSE URL
+ *   AGENT_FALLBACK         "true" to enable fallback mode by default
+ *   AGENT_CONTEXT_TOKENS   Context window size for compression trigger
  */
 
 import * as path from 'path'
@@ -151,14 +172,17 @@ async function main() {
     loadDotEnv(path.join(os.homedir(), '.agent-runner'))
   }
 
-  // System prompt: --system-file > --system > AGENT_SYSTEM_FILE > CLAUDE.md autodetect > AGENT_SYSTEM
-  let resolvedSystemPrompt = argConfig.systemPrompt  // already loaded from file if --system-file used
+  // System prompt priority: --system-file > --system > AGENT_SYSTEM_FILE > AGENT_SYSTEM > built-in default.
+  // Note: if --system-file was passed, argConfig.systemPrompt already contains the file content
+  // (loaded by the parseArgs switch). We only need to check env fallbacks here.
+  let resolvedSystemPrompt = argConfig.systemPrompt
   if (!resolvedSystemPrompt && process.env.AGENT_SYSTEM_FILE) {
     try { resolvedSystemPrompt = fs.readFileSync(process.env.AGENT_SYSTEM_FILE, 'utf-8') } catch { /* ignore */ }
   }
   if (!resolvedSystemPrompt) {
     resolvedSystemPrompt = process.env.AGENT_SYSTEM
   }
+  // If still undefined, loop.ts will use DEFAULT_SYSTEM.
 
   const config: Config = {
     baseUrl: argConfig.baseUrl ?? process.env.AGENT_BASEURL ?? 'https://openrouter.ai/api/v1',

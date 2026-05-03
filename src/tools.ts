@@ -1,3 +1,38 @@
+/**
+ * Tool registry and executor for agent-runner.
+ *
+ * Each tool is declared twice:
+ *   1. In TOOLS[] — the schema exposed to the LLM (OpenAI function-calling format).
+ *      The description and parameter docs are what the model reads to decide how to call the tool.
+ *   2. In executeTool() switch — the actual Node.js implementation.
+ *
+ * Adding a new tool:
+ *   1. Add an entry to TOOLS[] with name, description, and parameters schema.
+ *   2. Add a matching case in the executeTool() switch that returns ExecuteResult.
+ *   3. If the tool is read-only and deterministic, it will be automatically cached
+ *      by ToolCache in loop.ts (add its name to the CACHEABLE set in cache.ts).
+ *
+ * Tool execution notes:
+ *   - All tools run synchronously in the main process (execSync for shell tools).
+ *     Parallelism is handled externally by Promise.all in executeToolCallsParallel().
+ *   - Output is capped: most tools slice content at 8 KB–16 KB to avoid flooding the context.
+ *   - Errors thrown inside a case bubble up to the outer try/catch and become error: true results.
+ *     The LLM sees the error message and can retry or adjust its approach.
+ *
+ * Available tools (12 built-in):
+ *   bash            — shell command execution
+ *   python_exec     — inline Python code execution via temp file
+ *   read_file       — file read with line numbers (offset/limit supported)
+ *   write_file      — full overwrite or append
+ *   edit_file       — targeted unique-string replacement (efficient for code edits)
+ *   list_dir        — structured directory listing with sizes
+ *   grep            — regex search using ripgrep (fallback: grep)
+ *   http_request    — HTTP GET/POST/PUT/PATCH/DELETE via curl
+ *   pdf_to_text     — PDF text extraction via pdftotext (poppler-utils)
+ *   youtube_transcript — subtitle download via yt-dlp, VTT stripped and deduplicated
+ *   web_search      — DuckDuckGo instant API + HTML scrape fallback
+ *   spawn_agent     — sub-agent via agent-runner --json subprocess (parallelisable)
+ */
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'

@@ -1,3 +1,28 @@
+/**
+ * Agentic loop — the core of agent-runner.
+ *
+ * Architecture:
+ *   runLoop(prompt) → builds messages[] → runTurn() → save session → emit done
+ *   runTurn()       → LLM call → parse tool_calls → execute in parallel → append results → repeat
+ *
+ * Key behaviours:
+ *   - Streaming: in interactive mode (!jsonMode), chunks are written to stdout as they arrive.
+ *     In JSON mode, the full response is awaited and emitted as a single text event.
+ *   - Parallel tool execution: all tool calls from one LLM response run via Promise.all,
+ *     so three read_file calls complete in ~1× latency instead of 3×.
+ *   - Tool result cache: read-only tools (read_file, list_dir, grep) are cached 60 s by ToolCache.
+ *     Write tools bypass the cache and also invalidate stale entries for the same key.
+ *   - MCP tools: if an MCPClient is connected, its tools are merged into allTools and dispatched
+ *     via mcpClient.callTool() when the LLM selects an "mcp_*" tool name.
+ *   - Fallback mode: for models without native tool_calls, extractFallbackToolCalls() parses
+ *     <tool_call>{...}</tool_call> tags from text content and executes them identically.
+ *   - Auto-compression: when the context reaches 80 % of config.contextTokens, compressHistory()
+ *     summarises old turns and replaces them with a single summary message, keeping the 6 most recent.
+ *
+ * Session persistence:
+ *   Sessions are stored in ~/.agent-runner/sessions/<id>.json (last 40 messages).
+ *   loadSession() / saveSession() handle read and write.
+ */
 import OpenAI from 'openai'
 import type { ChatCompletionMessageParam, ChatCompletionChunk } from 'openai/resources/chat/completions'
 import { Config, emit } from './types'
