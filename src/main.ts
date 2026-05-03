@@ -28,6 +28,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 import { runLoop } from './loop'
+import { runRepl } from './repl'
 import { Config } from './types'
 import { runWizard } from './wizard'
 
@@ -63,18 +64,23 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
         break
       case '--help':
       case '-h':
-        console.log(`Usage: agent-runner "prompt" [options]
+        console.log(`Usage:
+  agent-runner                    interactive REPL mode
+  agent-runner "prompt"           single-shot mode
+  agent-runner --resume SESSION   resume session (REPL or single-shot)
 
 Options:
   --model MODEL       LLM model (overrides AGENT_MODEL)
   --baseurl URL       API base URL (overrides AGENT_BASEURL)
-  --json              JSON event stream mode
+  --json              JSON event stream mode (single-shot only)
   --resume SESSION    Resume previous session
-  --max-iter N        Max iterations (default: 15)
-  --cwd DIR           Working directory
+  --max-iter N        Max tool iterations per turn (default: 15)
+  --cwd DIR           Working directory for tools
   --system PROMPT     System prompt override
   --setup             Run setup wizard
   --version           Show version
+
+REPL commands: /exit  /session  /clear  /help
 
 Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL`)
         process.exit(0)
@@ -125,11 +131,6 @@ async function main() {
     loadDotEnv(path.join(os.homedir(), '.agent-runner'))
   }
 
-  if (!prompt) {
-    process.stderr.write('Usage: agent-runner "your prompt" [--model MODEL] [--json]\n')
-    process.exit(1)
-  }
-
   const config: Config = {
     baseUrl: argConfig.baseUrl ?? process.env.AGENT_BASEURL ?? 'https://openrouter.ai/api/v1',
     apiKey: argConfig.apiKey ?? process.env.AGENT_API_KEY ?? '',
@@ -143,6 +144,17 @@ async function main() {
 
   if (!config.apiKey) {
     process.stderr.write('Error: AGENT_API_KEY not set\n')
+    process.exit(1)
+  }
+
+  // No prompt + interactive → REPL mode
+  if (!prompt && !isJsonMode) {
+    await runRepl(config)
+    return
+  }
+
+  if (!prompt) {
+    process.stderr.write('Usage: agent-runner "your prompt" [--model MODEL] [--json]\n')
     process.exit(1)
   }
 
