@@ -28,20 +28,27 @@ Works with any LLM that supports function/tool calling:
 
 ## Install
 
-### Option A: Download binary (no Node.js required)
+### One-liner (recommended)
 
 ```bash
-curl -L https://github.com/deploy-sh/agent-runner/releases/latest/download/agent-runner-linux-x64 \
-  -o /usr/local/bin/agent-runner
-chmod +x /usr/local/bin/agent-runner
-agent-runner  # launches first-run wizard
+curl -fsSL https://raw.githubusercontent.com/deploy-sh/agent-runner/main/install.sh | bash
 ```
 
-### Option B: npm
+Downloads the binary, places it in `/usr/local/bin` (root) or `~/.local/bin` (user), adds to PATH.
+
+After install:
+```bash
+agent-runner --setup   # first-run wizard
+agent-runner "do something"
+```
+
+### Option B: Download binary manually
 
 ```bash
-npm install -g agent-runner
-agent-runner  # launches first-run wizard
+curl -fsSL https://github.com/deploy-sh/agent-runner/releases/latest/download/agent-runner-linux-x64 \
+  -o /usr/local/bin/agent-runner
+chmod +x /usr/local/bin/agent-runner
+agent-runner --setup
 ```
 
 ### Option C: from source
