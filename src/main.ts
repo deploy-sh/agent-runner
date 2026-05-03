@@ -1,0 +1,128 @@
+#!/usr/bin/env node
+/**
+ * agent-runner — standalone agentic loop CLI
+ *
+ * Usage:
+ *   agent-runner "do something" [options]
+ *   agent-runner --resume SESSION_ID "next message" [options]
+ *   agent-runner --help
+ *
+ * Options:
+ *   --model MODEL       LLM model name (overrides AGENT_MODEL)
+ *   --baseurl URL       API base URL (overrides AGENT_BASEURL)
+ *   --json              Output JSON events to stdout
+ *   --resume SESSION    Resume a previous session by ID
+ *   --max-iter N        Max tool-use iterations (default: 15)
+ *   --cwd DIR           Working directory for tools (default: cwd)
+ *   --system PROMPT     Override system prompt
+ *
+ * Env vars (from .env or environment):
+ *   AGENT_BASEURL       API base URL (e.g. https://openrouter.ai/api/v1)
+ *   AGENT_API_KEY       API key
+ *   AGENT_MODEL         Default model (e.g. qwen/qwen3-235b-a22b)
+ *   AGENT_MAX_ITER      Default max iterations
+ *   AGENT_SYSTEM        Default system prompt
+ */
+
+import * as path from 'path'
+import * as fs from 'fs'
+import { runLoop } from './loop'
+import { Config } from './types'
+
+// Load .env from cwd or home
+function loadDotEnv(dir: string): void {
+  const file = path.join(dir, '.env')
+  if (!fs.existsSync(file)) return
+  for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
+    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
+    if (match && !process.env[match[1]]) {
+      process.env[match[1]] = match[2].replace(/^["']|["']$/g, '')
+    }
+  }
+}
+
+loadDotEnv(process.cwd())
+loadDotEnv(path.join(require('os').homedir(), '.agent-runner'))
+
+function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } {
+  const args = argv.slice(2)
+  const config: Partial<Config> = {}
+  let prompt = ''
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case '--help':
+      case '-h':
+        console.log((require('../src/main') as never) || '')
+        process.stdout.write(fs.readFileSync(__filename, 'utf-8').split('\n').slice(1, 25).join('\n'))
+        process.exit(0)
+        break
+      case '--model':
+        config.model = args[++i]
+        break
+      case '--baseurl':
+        config.baseUrl = args[++i]
+        break
+      case '--json':
+        config.jsonMode = true
+        break
+      case '--resume':
+        config.sessionId = args[++i]
+        break
+      case '--max-iter':
+        config.maxIterations = parseInt(args[++i], 10)
+        break
+      case '--cwd':
+        config.projectRoot = args[++i]
+        break
+      case '--system':
+        config.systemPrompt = args[++i]
+        break
+      default:
+        if (!args[i].startsWith('--')) {
+          prompt = args[i]
+        }
+    }
+  }
+
+  return { prompt, config }
+}
+
+async function main() {
+  const { prompt, config: argConfig } = parseArgs(process.argv)
+
+  if (!prompt) {
+    process.stderr.write('Usage: agent-runner "your prompt" [--model MODEL] [--json]\n')
+    process.exit(1)
+  }
+
+  const config: Config = {
+    baseUrl: argConfig.baseUrl ?? process.env.AGENT_BASEURL ?? 'https://openrouter.ai/api/v1',
+    apiKey: argConfig.apiKey ?? process.env.AGENT_API_KEY ?? '',
+    model: argConfig.model ?? process.env.AGENT_MODEL ?? 'openai/gpt-4o-mini',
+    sessionId: argConfig.sessionId,
+    jsonMode: argConfig.jsonMode ?? false,
+    maxIterations: argConfig.maxIterations ?? parseInt(process.env.AGENT_MAX_ITER ?? '15', 10),
+    projectRoot: argConfig.projectRoot ?? process.cwd(),
+    systemPrompt: argConfig.systemPrompt ?? process.env.AGENT_SYSTEM
+  }
+
+  if (!config.apiKey) {
+    process.stderr.write('Error: AGENT_API_KEY not set\n')
+    process.exit(1)
+  }
+
+  try {
+    await runLoop(prompt, config)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (config.jsonMode) {
+      process.stdout.write(JSON.stringify({ type: 'error', message: msg }) + '\n')
+    } else {
+      process.stderr.write(`Error: ${msg}\n`)
+    }
+    process.exit(1)
+  }
+}
+
+main()
