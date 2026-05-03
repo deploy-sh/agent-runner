@@ -1,5 +1,5 @@
 import OpenAI from 'openai'
-import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
+import type { ChatCompletionMessageParam, ChatCompletionChunk } from 'openai/resources/chat/completions'
 import { Config, emit } from './types'
 import { openAITools, executeTool } from './tools'
 import * as fs from 'fs'
@@ -7,7 +7,7 @@ import * as path from 'path'
 import * as os from 'os'
 
 export const DEFAULT_SYSTEM = `You are a helpful AI assistant with access to tools.
-You can execute shell commands, read and write files, and make HTTP requests.
+You can execute shell commands, read and write files, search in files, and make HTTP requests.
 Work in the project directory unless told otherwise.
 Be concise and practical. When using tools, explain briefly what you are doing.`
 
@@ -35,10 +35,17 @@ export function createClient(config: Config): OpenAI {
   return new OpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey })
 }
 
+// Accumulated tool call from streaming chunks
+interface AccToolCall {
+  id: string
+  type: string
+  function: { name: string; arguments: string }
+}
+
 /**
  * Run one agentic turn: LLM → tools → LLM → ... → final answer.
- * Returns updated messages array (appended in place of input).
- * Emits events (text, tool_call, tool_result) as they happen.
+ * Returns updated messages array.
+ * Streams text to stdout when not in jsonMode.
  */
 export async function runTurn(
   client: OpenAI,
@@ -52,25 +59,71 @@ export async function runTurn(
   while (iterations < config.maxIterations) {
     iterations++
 
-    const response = await client.chat.completions.create({
-      model: config.model,
-      messages: current,
-      tools,
-      tool_choice: 'auto'
-    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let assistantMsg: any
 
-    const msg = response.choices[0].message
-    current.push(msg as ChatCompletionMessageParam)
+    if (config.jsonMode) {
+      // Non-streaming: emit full text event at once (for aiclaw JSON parser)
+      const response = await client.chat.completions.create({
+        model: config.model,
+        messages: current,
+        tools,
+        tool_choice: 'auto'
+      })
+      assistantMsg = response.choices[0].message
+      if (assistantMsg.content) {
+        emit({ type: 'text', content: assistantMsg.content }, true)
+      }
+    } else {
+      // Streaming: write text chunks to stdout as they arrive
+      const stream = await client.chat.completions.create({
+        model: config.model,
+        messages: current,
+        tools,
+        tool_choice: 'auto',
+        stream: true
+      }) as AsyncIterable<ChatCompletionChunk>
 
-    if (msg.content) {
-      emit({ type: 'text', content: msg.content }, config.jsonMode)
+      let content = ''
+      const toolCallsAcc: AccToolCall[] = []
+
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta
+        if (!delta) continue
+
+        if (delta.content) {
+          content += delta.content
+          process.stdout.write(delta.content)
+        }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index
+            if (!toolCallsAcc[idx]) {
+              toolCallsAcc[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } }
+            }
+            if (tc.id) toolCallsAcc[idx].id = tc.id
+            if (tc.function?.name) toolCallsAcc[idx].function.name += tc.function.name
+            if (tc.function?.arguments) toolCallsAcc[idx].function.arguments += tc.function.arguments
+          }
+        }
+      }
+
+      assistantMsg = {
+        role: 'assistant',
+        content: content || null,
+        tool_calls: toolCallsAcc.length > 0 ? toolCallsAcc : undefined
+      }
     }
 
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
+    current.push(assistantMsg as ChatCompletionMessageParam)
+
+    if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
       break
     }
 
-    for (const call of msg.tool_calls) {
+    // Execute tool calls (shared between streaming and non-streaming)
+    for (const call of assistantMsg.tool_calls) {
       const name = call.function.name
       let args: Record<string, unknown> = {}
       try {
