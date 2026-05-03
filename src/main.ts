@@ -87,7 +87,7 @@ Options:
 
 REPL commands: /exit  /context  /session  /clear  /help
 
-Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL`)
+Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL, AGENT_SYSTEM_FILE`)
         process.exit(0)
         break
       case '--model':
@@ -155,13 +155,6 @@ async function main() {
   let resolvedSystemPrompt = argConfig.systemPrompt  // already loaded from file if --system-file used
   if (!resolvedSystemPrompt && process.env.AGENT_SYSTEM_FILE) {
     try { resolvedSystemPrompt = fs.readFileSync(process.env.AGENT_SYSTEM_FILE, 'utf-8') } catch { /* ignore */ }
-  }
-  if (!resolvedSystemPrompt && process.env.AGENT_AUTO_CLAUDE_MD !== 'false') {
-    const claudeMd = path.join(argConfig.projectRoot ?? process.cwd(), 'CLAUDE.md')
-    if (fs.existsSync(claudeMd)) {
-      resolvedSystemPrompt = fs.readFileSync(claudeMd, 'utf-8')
-      if (!isJsonMode) process.stderr.write(`[system] Loaded CLAUDE.md from ${claudeMd}\n`)
-    }
   }
   if (!resolvedSystemPrompt) {
     resolvedSystemPrompt = process.env.AGENT_SYSTEM
