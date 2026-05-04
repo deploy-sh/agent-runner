@@ -43,6 +43,9 @@
  *   AGENT_MCP_URL          Default MCP server SSE URL
  *   AGENT_FALLBACK         "true" to enable fallback mode by default
  *   AGENT_CONTEXT_TOKENS   Context window size for compression trigger
+ *   AGENT_MEMORY_DIR       Root dir for memory_write/memory_search tools
+ *                          (default: ~/.agent-runner/memory)
+ *                          Example: AGENT_MEMORY_DIR=/root/claudeclaw/vault
  */
 
 import './suppress-warnings' // must be first — suppresses DEP0040 punycode warning
@@ -79,7 +82,7 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
     switch (args[i]) {
       case '--version':
       case '-v':
-        console.log('0.4.4')
+        console.log('0.4.5')
         process.exit(0)
         break
       case '--setup':
@@ -104,12 +107,13 @@ Options:
   --mcp URL           Connect to MCP server SSE URL (adds extra tools)
   --fallback          Use prompt-based tool calls (for models without native tool_calls)
   --context N         Context window token limit for compression (default: 32000)
+  --memory DIR        Memory root dir for memory_write/memory_search tools
   --setup             Run setup wizard
   --version           Show version
 
 REPL commands: /exit  /context  /session  /clear  /model  /source  /help
 
-Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL, AGENT_SYSTEM_FILE`)
+Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL, AGENT_SYSTEM_FILE, AGENT_MEMORY_DIR`)
         process.exit(0)
         break
       case '--model':
@@ -147,6 +151,9 @@ Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL, AGENT_SYSTEM
         break
       case '--context':
         config.contextTokens = parseInt(args[++i], 10)
+        break
+      case '--memory':
+        config.memoryDir = args[++i]
         break
       default:
         if (!args[i].startsWith('--')) {
@@ -196,7 +203,8 @@ async function main() {
     systemPrompt: resolvedSystemPrompt,
     contextTokens: argConfig.contextTokens ?? parseInt(process.env.AGENT_CONTEXT_TOKENS ?? '32000', 10),
     useFallback: argConfig.useFallback ?? (process.env.AGENT_FALLBACK === 'true'),
-    mcpUrl: argConfig.mcpUrl ?? process.env.AGENT_MCP_URL
+    mcpUrl: argConfig.mcpUrl ?? process.env.AGENT_MCP_URL,
+    memoryDir: argConfig.memoryDir ?? process.env.AGENT_MEMORY_DIR ?? path.join(os.homedir(), '.agent-runner', 'memory')
   }
 
   if (!config.apiKey) {

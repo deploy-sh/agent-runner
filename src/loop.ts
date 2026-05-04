@@ -43,7 +43,9 @@ Rules:
 - For ANY question about system state (disk usage, memory, CPU, processes, network, uptime) — use bash immediately. Never guess.
 - For file questions — use read_file or list_dir, not bash ls/cat.
 - For code searches — use grep.
-- When multiple independent tasks are needed — call several tools in one response.`
+- When multiple independent tasks are needed — call several tools in one response.
+- To remember something for future sessions — use memory_write.
+- Before answering questions about past decisions or work — call memory_search first.`
 
 // Fallback system prompt for models without native tool_calls
 const FALLBACK_SYSTEM_SUFFIX = `
@@ -124,7 +126,7 @@ async function executeToolCallsParallel(
     if (name.startsWith('mcp_') && mcpClient) {
       result = await mcpClient.callTool(name, args)
     } else {
-      result = executeTool(name, args, config.projectRoot)
+      result = executeTool(name, args, config.projectRoot, config.memoryDir)
     }
 
     cache.set(name, args, result)

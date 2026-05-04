@@ -19,7 +19,7 @@
  *   - Errors thrown inside a case bubble up to the outer try/catch and become error: true results.
  *     The LLM sees the error message and can retry or adjust its approach.
  *
- * Available tools (12 built-in):
+ * Available tools (14 built-in):
  *   bash            — shell command execution
  *   python_exec     — inline Python code execution via temp file
  *   read_file       — file read with line numbers (offset/limit supported)
@@ -30,12 +30,15 @@
  *   http_request    — HTTP GET/POST/PUT/PATCH/DELETE via curl
  *   pdf_to_text     — PDF text extraction via pdftotext (poppler-utils)
  *   youtube_transcript — subtitle download via yt-dlp, VTT stripped and deduplicated
- *   web_search      — DuckDuckGo instant API + HTML scrape fallback
+ *   web_search      — DuckDuckGo HTML search via Python urllib
  *   spawn_agent     — sub-agent via agent-runner --json subprocess (parallelisable)
+ *   memory_write    — append a note to persistent markdown memory (wiki/raw/inbox)
+ *   memory_search   — search persistent memory recursively by keyword
  */
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
+import * as os from 'os'
 
 export interface Tool {
   name: string
@@ -198,6 +201,30 @@ export const TOOLS: Tool[] = [
       },
       required: ['prompt']
     }
+  },
+  {
+    name: 'memory_write',
+    description: 'Save a note, fact, or decision to persistent markdown memory for future sessions. Appends with timestamp. Default file is inbox.md; use a relative path like "raw/project.md" or "raw/Inbox/2026-05-04-notes.md" for vault-style layout.',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'Text to save (markdown supported)' },
+        file: { type: 'string', description: 'Relative path within memory dir (default: inbox.md)' }
+      },
+      required: ['content']
+    }
+  },
+  {
+    name: 'memory_search',
+    description: 'Search persistent memory (wiki, raw notes, inbox) by keyword. Returns matching lines with file paths and line numbers. Searches all .md files recursively.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search keyword or regex' },
+        path: { type: 'string', description: 'Subdirectory to search within memory dir (e.g. "wiki", "raw"). Default: all.' }
+      },
+      required: ['query']
+    }
   }
 ]
 
@@ -221,8 +248,10 @@ export interface ExecuteResult {
 export function executeTool(
   name: string,
   args: Record<string, unknown>,
-  projectRoot: string
+  projectRoot: string,
+  memoryDir?: string
 ): ExecuteResult {
+  const memDir = memoryDir ?? path.join(os.homedir(), '.agent-runner', 'memory')
   try {
     switch (name) {
       case 'bash': {
@@ -511,6 +540,34 @@ except Exception as e:
         } finally {
           try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
         }
+      }
+
+      case 'memory_write': {
+        const content = args.content as string
+        const file = (args.file as string | undefined) ?? 'inbox.md'
+        const fullPath = path.isAbsolute(file) ? file : path.join(memDir, file)
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+        const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19)
+        const entry = `\n## ${timestamp}\n${content}\n`
+        fs.appendFileSync(fullPath, entry, 'utf-8')
+        return { content: `Saved to ${fullPath}`, error: false }
+      }
+
+      case 'memory_search': {
+        const query = args.query as string
+        const scope = (args.path as string | undefined) ?? '.'
+        const searchPath = path.isAbsolute(scope) ? scope : path.join(memDir, scope)
+
+        if (!fs.existsSync(searchPath)) {
+          return { content: `(memory path not found: ${searchPath})\nSet AGENT_MEMORY_DIR or use --memory to configure.`, error: false }
+        }
+
+        const safe = (s: string) => `'${s.replace(/'/g, "'\\''")}'`
+        const result = execSync(
+          `rg -n -C 2 ${safe(query)} ${safe(searchPath)} --glob '*.md' 2>/dev/null || grep -rn ${safe(query)} ${safe(searchPath)} --include='*.md' 2>/dev/null || echo '(no matches)'`,
+          { encoding: 'utf-8', timeout: 15000, maxBuffer: 2 * 1024 * 1024, cwd: searchPath }
+        )
+        return { content: result.slice(0, 8192) || '(no matches)', error: false }
       }
 
       default:

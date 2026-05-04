@@ -68,6 +68,20 @@ export interface Config {
    * Example: http://localhost:3000/sse or https://mcp.example.com/sse
    */
   mcpUrl?: string
+
+  /**
+   * Root directory for persistent memory (markdown wiki/raw/inbox layout).
+   * Default: ~/.agent-runner/memory
+   *
+   * Can point to an existing vault, e.g.:
+   *   --memory /root/claudeclaw/vault
+   *   AGENT_MEMORY_DIR=/root/claudeclaw/vault
+   *
+   * memory_search searches {memoryDir}/**\/*.md recursively.
+   * memory_write appends to {memoryDir}/{file} (default: inbox.md).
+   * This enables vault-style wiki + raw + inbox without any database.
+   */
+  memoryDir?: string
 }
 
 /**
