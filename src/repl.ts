@@ -34,6 +34,9 @@ const C = {
   reset:  tty ? '\x1b[0m'   : '',  // reset
 }
 
+// System/command output — dim so it's visually distinct from LLM responses
+const ui = (s = '') => console.log(C.dim + s + C.reset)
+
 // ─── Banner ──────────────────────────────────────────────────────────────────
 //
 // Uses only box-drawing chars (╔ ═ ║ ┌ ─ ┐ │ └ ┘) and ASCII printable chars.
@@ -186,8 +189,8 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
   rl.on('close', () => {
     const toSave = messages.filter(m => m.role !== 'system')
     saveSession(sessionId, toSave)
-    console.log(`\n\nSession saved: ${sessionId}`)
-    console.log(`Resume: agent-runner --resume ${sessionId}`)
+    ui(`\n\nSession saved: ${sessionId}`)
+    ui(`Resume: agent-runner --resume ${sessionId}`)
     process.exit(0)
   })
 
@@ -211,20 +214,20 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     }
 
     if (input === '/context') {
-      console.log(`Context: ${contextStats(messages, config)}`)
+      ui(`Context: ${contextStats(messages, config)}`)
       continue
     }
 
     if (input === '/session') {
-      console.log(`Session: ${sessionId}`)
-      console.log(`Resume:  agent-runner --resume ${sessionId}`)
+      ui(`Session: ${sessionId}`)
+      ui(`Resume:  agent-runner --resume ${sessionId}`)
       continue
     }
 
     if (input === '/clear') {
       messages = [{ role: 'system', content: systemContent }]
       cache.invalidate()
-      console.log('History cleared, cache invalidated')
+      ui('History cleared, cache invalidated')
       continue
     }
 
@@ -235,29 +238,29 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
       if (arg) {
         // Direct: /model qwen/qwen3-coder:free
         config.model = arg
-        console.log(`Model: ${config.model}`)
+        ui(`Model: ${config.model}`)
       } else {
         // Interactive: fetch list, show numbered menu
-        process.stdout.write('Fetching models...')
+        process.stdout.write(C.dim + 'Fetching models...' + C.reset)
         const models = await fetchModels(config)
         if (models.length === 0) {
-          console.log('\nCould not fetch models. Try: /model <model-id>')
+          ui('\nCould not fetch models. Try: /model <model-id>')
         } else {
-          console.log('\n')
+          ui()
           models.forEach((m, i) => {
             const num = String(i + 1).padStart(2)
             const id = m.id.padEnd(52)
             const active = m.id === config.model ? ' <' : ''
-            console.log(`  ${num}) ${id} ${m.price}${active}`)
+            ui(`  ${num}) ${id} ${m.price}${active}`)
           })
           const choice = (await ask('\nNumber or model ID (Enter to cancel): ')).trim()
           const choiceNum = parseInt(choice, 10)
           if (!isNaN(choiceNum) && choiceNum >= 1 && choiceNum <= models.length) {
             config.model = models[choiceNum - 1].id
-            console.log(`Switched to: ${config.model}`)
+            ui(`Switched to: ${config.model}`)
           } else if (choice && isNaN(choiceNum)) {
             config.model = choice
-            console.log(`Switched to: ${config.model}`)
+            ui(`Switched to: ${config.model}`)
           }
         }
       }
@@ -272,7 +275,7 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
         // Direct URL: /source http://localhost:11434/v1
         config.baseUrl = arg
         client = createClient(config)
-        console.log(`Source: ${config.baseUrl}`)
+        ui(`Source: ${config.baseUrl}`)
       } else if (arg && !isNaN(parseInt(arg, 10))) {
         // Shorthand: /source 2
         const idx = parseInt(arg, 10) - 1
@@ -281,21 +284,21 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
           config.baseUrl = p.url
           if (p.envKey && process.env[p.envKey]) {
             config.apiKey = process.env[p.envKey]!
-            console.log(`Switched to ${p.name} (key from ${p.envKey})`)
+            ui(`Switched to ${p.name} (key from ${p.envKey})`)
           } else if (p.envKey) {
             const key = (await ask(`${p.name} API key: `)).trim()
             if (key) config.apiKey = key
           } else {
             config.apiKey = 'ollama'
-            console.log(`Switched to ${p.name} (no key needed)`)
+            ui(`Switched to ${p.name} (no key needed)`)
           }
           client = createClient(config)
-          console.log(`Use /model to pick a model for ${p.name}`)
+          ui(`Use /model to pick a model for ${p.name}`)
         }
       } else {
         // Interactive menu
         const currentProvider = PROVIDERS.find(p => p.url === config.baseUrl)?.name ?? 'Custom'
-        console.log(`\nCurrent: ${currentProvider} (${config.baseUrl})\n`)
+        ui(`\nCurrent: ${currentProvider} (${config.baseUrl})\n`)
         PROVIDERS.forEach((p, i) => {
           const active = p.url === config.baseUrl ? ' <' : ''
           const isCurrent = p.url === config.baseUrl
@@ -304,9 +307,9 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
             : p.envKey
               ? (process.env[p.envKey] ? '(key found)' : '(no key in env)')
               : '(no key needed)'
-          console.log(`  ${i + 1}) ${p.name.padEnd(12)} ${keyStatus}${active}`)
+          ui(`  ${i + 1}) ${p.name.padEnd(12)} ${keyStatus}${active}`)
         })
-        console.log(`  ${PROVIDERS.length + 1}) Custom URL...`)
+        ui(`  ${PROVIDERS.length + 1}) Custom URL...`)
 
         const choice = (await ask('\nNumber or URL (Enter to cancel): ')).trim()
         const choiceNum = parseInt(choice, 10)
@@ -315,12 +318,12 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
           const p = PROVIDERS[choiceNum - 1]
           if (p.url === config.baseUrl) {
             // Already on this provider — keep current key
-            console.log(`Already on ${p.name}.`)
+            ui(`Already on ${p.name}.`)
           } else {
             config.baseUrl = p.url
             if (p.envKey && process.env[p.envKey]) {
               config.apiKey = process.env[p.envKey]!
-              console.log(`Using ${p.envKey} from environment.`)
+              ui(`Using ${p.envKey} from environment.`)
             } else if (p.envKey) {
               const key = (await ask(`${p.name} API key: `)).trim()
               if (key) config.apiKey = key
@@ -328,7 +331,7 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
               config.apiKey = 'ollama'
             }
             client = createClient(config)
-            console.log(`Switched to ${p.name}. Use /model to pick a model.`)
+            ui(`Switched to ${p.name}. Use /model to pick a model.`)
           }
         } else if (choiceNum === PROVIDERS.length + 1 || (choice && choice.startsWith('http'))) {
           const url = choice.startsWith('http') ? choice : (await ask('Base URL: ')).trim()
@@ -337,7 +340,7 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
             const key = (await ask('API key (Enter to keep current): ')).trim()
             if (key) config.apiKey = key
             client = createClient(config)
-            console.log(`Switched to: ${url}`)
+            ui(`Switched to: ${url}`)
           }
         }
       }
@@ -345,16 +348,16 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     }
 
     if (input === '/help') {
-      console.log('/exit              quit and save session')
-      console.log('/context           show token usage')
-      console.log('/session           show session ID and resume command')
-      console.log('/clear             clear conversation history and cache')
-      console.log('/model             list available models and switch')
-      console.log('/model <id>        switch to a specific model immediately')
-      console.log('/source            switch API provider interactively')
-      console.log('/source <N>        switch to preset provider by number (1-5)')
-      console.log('/source <url>      switch to custom base URL directly')
-      console.log('/help              this message')
+      ui('/exit              quit and save session')
+      ui('/context           show token usage')
+      ui('/session           show session ID and resume command')
+      ui('/clear             clear conversation history and cache')
+      ui('/model             list available models and switch')
+      ui('/model <id>        switch to a specific model immediately')
+      ui('/source            switch API provider interactively')
+      ui('/source <N>        switch to preset provider by number (1-5)')
+      ui('/source <url>      switch to custom base URL directly')
+      ui('/help              this message')
       continue
     }
 
