@@ -21,7 +21,8 @@ mkdir -p release
 npx pkg release/agent-runner.js \
   --target node22-linux-x64 \
   --output release/agent-runner-linux-x64 \
-  --compress GZip
+  --compress GZip \
+  --options no-deprecation
 
 echo "=== Done ==="
 ls -lh release/agent-runner-linux-x64
