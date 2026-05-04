@@ -46,7 +46,7 @@ export interface Tool {
 export const TOOLS: Tool[] = [
   {
     name: 'bash',
-    description: 'Execute a shell command. Use for running scripts, installing packages, git operations, etc.',
+    description: 'Execute a shell command. Use for ANY system task: disk usage (df -h), memory (free -h), CPU (top -bn1), processes (ps aux), network, git, packages, scripts. When in doubt, use bash.',
     parameters: {
       type: 'object',
       properties: {
@@ -458,35 +458,59 @@ export function executeTool(
       case 'web_search': {
         const query = args.query as string
         const count = Math.min((args.count as number) ?? 5, 10)
-        // DuckDuckGo instant answer API
-        const encoded = encodeURIComponent(query)
-        const ddgResult = execSync(
-          `curl -s -A 'Mozilla/5.0' 'https://api.duckduckgo.com/?q=${encoded}&format=json&no_redirect=1&no_html=1&skip_disambig=1' 2>/dev/null`,
-          { encoding: 'utf-8', timeout: 15000 }
-        )
-        // Also get web results via HTML scrape fallback
-        const htmlResult = execSync(
-          `curl -s -A 'Mozilla/5.0' 'https://html.duckduckgo.com/html/?q=${encoded}' 2>/dev/null | grep -oP '(?<=class="result__snippet">)[^<]+' | head -${count}`,
-          { encoding: 'utf-8', timeout: 15000 }
-        )
 
-        let output = ''
+        // Use Python urllib for reliable HTML parsing — avoids grep -P portability issues
+        const pythonCode = `
+import urllib.request, urllib.parse, html as htmllib, re, json, sys
+
+query = ${JSON.stringify(query)}
+count = ${count}
+encoded = urllib.parse.quote_plus(query)
+
+# Try HTML search results first
+try:
+    req = urllib.request.Request(
+        f'https://html.duckduckgo.com/html/?q={encoded}',
+        headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120'}
+    )
+    raw = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', errors='replace')
+    clean = lambda s: htmllib.unescape(re.sub(r'<[^>]+>', '', s)).strip()
+    titles   = [clean(m) for m in re.findall(r'class="result__a"[^>]*>(.*?)</a>', raw, re.DOTALL)]
+    snippets = [clean(m) for m in re.findall(r'class="result__snippet">(.*?)</a>', raw, re.DOTALL)]
+    urls     = [clean(m) for m in re.findall(r'class="result__url"[^>]*>(.*?)</(?:a|span)>', raw, re.DOTALL)]
+    out = []
+    for i in range(min(count, len(titles))):
+        t = titles[i]; u = urls[i] if i < len(urls) else ''; s = snippets[i] if i < len(snippets) else ''
+        if t: out.append(f'{i+1}. {t}\\n   {u}\\n   {s}')
+    if out:
+        print(f'Results for: {query}\\n\\n' + '\\n\\n'.join(out))
+        sys.exit(0)
+except Exception:
+    pass
+
+# Fallback: DDG instant answer API
+try:
+    req2 = urllib.request.Request(
+        f'https://api.duckduckgo.com/?q={encoded}&format=json&no_redirect=1&no_html=1&skip_disambig=1',
+        headers={'User-Agent': 'Mozilla/5.0'}
+    )
+    ddg = json.loads(urllib.request.urlopen(req2, timeout=10).read().decode('utf-8'))
+    out2 = []
+    if ddg.get('Abstract'): out2.append(f'Summary: {ddg["Abstract"]}\\nSource: {ddg.get("AbstractURL","")}')
+    for t in ddg.get('RelatedTopics', [])[:count]:
+        if t.get('Text'): out2.append(f'- {t["Text"]}\\n  {t.get("FirstURL","")}')
+    print('\\n\\n'.join(out2) if out2 else '(no results)')
+except Exception as e:
+    print(f'(search error: {e})')
+`
+        const tmpFile = `/tmp/agent_ws_${Date.now()}.py`
         try {
-          const ddg = JSON.parse(ddgResult)
-          if (ddg.Abstract) output += `Summary: ${ddg.Abstract}\nSource: ${ddg.AbstractURL}\n\n`
-          if (ddg.RelatedTopics?.length) {
-            const topics = (ddg.RelatedTopics as Array<{Text?: string; FirstURL?: string}>)
-              .filter(t => t.Text)
-              .slice(0, count)
-            output += topics.map(t => `• ${t.Text}\n  ${t.FirstURL ?? ''}`).join('\n')
-          }
-        } catch { /* ignore DDG parse errors */ }
-
-        if (!output.trim() && htmlResult.trim()) {
-          output = `Search results for "${query}":\n\n` + htmlResult.trim()
+          fs.writeFileSync(tmpFile, pythonCode)
+          const result = execSync(`python3 '${tmpFile}'`, { encoding: 'utf-8', timeout: 15000 })
+          return { content: result.slice(0, 8192) || '(no results)', error: false }
+        } finally {
+          try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
         }
-
-        return { content: output.slice(0, 8192) || '(no results)', error: false }
       }
 
       default:

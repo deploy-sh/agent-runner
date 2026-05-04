@@ -96,13 +96,18 @@ export type Event =
  * In interactive mode: text → stdout directly (for streaming display),
  *   tool calls/results → stderr so they don't pollute redirected stdout.
  */
+// Dim color for tool calls / results in TTY mode
+const _tty = process.stderr.isTTY ?? false
+const _dim = _tty ? '\x1b[2m' : ''
+const _rst = _tty ? '\x1b[0m' : ''
+
 export function emit(event: Event, jsonMode: boolean): void {
   if (jsonMode) {
     process.stdout.write(JSON.stringify(event) + '\n')
   } else {
     if (event.type === 'text') process.stdout.write(event.content)
-    if (event.type === 'tool_call') process.stderr.write(`[${event.name}] ${JSON.stringify(event.args)}\n`)
-    if (event.type === 'tool_result') process.stderr.write(`→ ${event.content.slice(0, 200)}\n`)
+    if (event.type === 'tool_call') process.stderr.write(`${_dim}[${event.name}] ${JSON.stringify(event.args)}${_rst}\n`)
+    if (event.type === 'tool_result') process.stderr.write(`${_dim}→ ${event.content.slice(0, 200)}${_rst}\n`)
     if (event.type === 'error') process.stderr.write(`ERROR: ${event.message}\n`)
     if (event.type === 'done') process.stdout.write('\n')
   }

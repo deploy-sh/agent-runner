@@ -23,7 +23,16 @@ import { MCPClient } from './mcp-client'
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 
-const VERSION = '0.4.3'
+const VERSION = '0.4.4'
+
+// ─── ANSI colors (only when stdout is a real TTY, not piped) ─────────────────
+const tty = process.stdout.isTTY ?? false
+const C = {
+  model:  tty ? '\x1b[36m'  : '',  // cyan   — model output
+  prompt: tty ? '\x1b[33m'  : '',  // yellow — user prompt >
+  dim:    tty ? '\x1b[2m'   : '',  // dim    — tool calls / secondary info
+  reset:  tty ? '\x1b[0m'   : '',  // reset
+}
 
 // ─── Banner ──────────────────────────────────────────────────────────────────
 //
@@ -38,7 +47,7 @@ const BANNER = `
 ║    │   A G R U N  v${VERSION}  │      ║
 ║    └──────────────────────┘      ║
 ║                                  ║
-║  (c) korfix.info  by l_a_n_d    ║
+║  (c) korfix.info  by l_a_n_d     ║
 ╚══════════════════════════════════╝`
 
 // ─── Provider presets ─────────────────────────────────────────────────────────
@@ -161,13 +170,14 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
   console.log(BANNER)
   console.log(`  Model  : ${config.model}`)
   console.log(`  Session: ${sessionId}`)
+  console.log(`  Dir    : ${config.projectRoot}`)
   if (mcpClient) console.log(`  MCP    : ${config.mcpUrl}`)
   if (config.useFallback) console.log(`  Mode   : fallback (prompt-based tools)`)
   if (history.length > 0) console.log(`  Loaded : ${history.length} messages`)
   console.log(`  Help   : /help\n`)
 
   // Prompt helper — waits for one line of input
-  const ask = (prompt = '> ') =>
+  const ask = (prompt = `${C.prompt}>${C.reset} `) =>
     new Promise<string>((resolve) => {
       process.stdout.write(prompt)
       rl.once('line', resolve)
@@ -288,9 +298,12 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
         console.log(`\nCurrent: ${currentProvider} (${config.baseUrl})\n`)
         PROVIDERS.forEach((p, i) => {
           const active = p.url === config.baseUrl ? ' <' : ''
-          const keyStatus = p.envKey
-            ? (process.env[p.envKey] ? '(key found)' : '(no key in env)')
-            : '(no key needed)'
+          const isCurrent = p.url === config.baseUrl
+          const keyStatus = isCurrent
+            ? '(current)'
+            : p.envKey
+              ? (process.env[p.envKey] ? '(key found)' : '(no key in env)')
+              : '(no key needed)'
           console.log(`  ${i + 1}) ${p.name.padEnd(12)} ${keyStatus}${active}`)
         })
         console.log(`  ${PROVIDERS.length + 1}) Custom URL...`)
@@ -300,18 +313,23 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
 
         if (!isNaN(choiceNum) && choiceNum >= 1 && choiceNum <= PROVIDERS.length) {
           const p = PROVIDERS[choiceNum - 1]
-          config.baseUrl = p.url
-          if (p.envKey && process.env[p.envKey]) {
-            config.apiKey = process.env[p.envKey]!
-            console.log(`Using ${p.envKey} from environment.`)
-          } else if (p.envKey) {
-            const key = (await ask(`${p.name} API key: `)).trim()
-            if (key) config.apiKey = key
+          if (p.url === config.baseUrl) {
+            // Already on this provider — keep current key
+            console.log(`Already on ${p.name}.`)
           } else {
-            config.apiKey = 'ollama'
+            config.baseUrl = p.url
+            if (p.envKey && process.env[p.envKey]) {
+              config.apiKey = process.env[p.envKey]!
+              console.log(`Using ${p.envKey} from environment.`)
+            } else if (p.envKey) {
+              const key = (await ask(`${p.name} API key: `)).trim()
+              if (key) config.apiKey = key
+            } else {
+              config.apiKey = 'ollama'
+            }
+            client = createClient(config)
+            console.log(`Switched to ${p.name}. Use /model to pick a model.`)
           }
-          client = createClient(config)
-          console.log(`Switched to ${p.name}. Use /model to pick a model.`)
         } else if (choiceNum === PROVIDERS.length + 1 || (choice && choice.startsWith('http'))) {
           const url = choice.startsWith('http') ? choice : (await ask('Base URL: ')).trim()
           if (url) {
@@ -345,14 +363,15 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     messages.push({ role: 'user', content: input })
 
     try {
-      process.stdout.write('\n')
+      process.stdout.write('\n' + C.model)
       messages = await runTurn(client, messages, config, cache, mcpClient)
-      process.stdout.write('\n')
+      process.stdout.write(C.reset + '\n')
 
       // Save session after every turn so Ctrl+C doesn't lose history
       const toSave = messages.filter(m => m.role !== 'system')
       saveSession(sessionId, toSave)
     } catch (err) {
+      process.stdout.write(C.reset)  // ensure color is reset even on error
       handleTurnError(err)
     }
   }

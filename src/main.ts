@@ -78,7 +78,7 @@ function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } 
     switch (args[i]) {
       case '--version':
       case '-v':
-        console.log('0.4.3')
+        console.log('0.4.4')
         process.exit(0)
         break
       case '--setup':
@@ -106,7 +106,7 @@ Options:
   --setup             Run setup wizard
   --version           Show version
 
-REPL commands: /exit  /context  /session  /clear  /help
+REPL commands: /exit  /context  /session  /clear  /model  /source  /help
 
 Env vars: AGENT_API_KEY, AGENT_BASEURL, AGENT_MODEL, AGENT_MCP_URL, AGENT_SYSTEM_FILE`)
         process.exit(0)

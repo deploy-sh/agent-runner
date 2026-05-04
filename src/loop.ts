@@ -35,9 +35,15 @@ import * as path from 'path'
 import * as os from 'os'
 
 export const DEFAULT_SYSTEM = `You are a helpful AI assistant with access to tools.
-You can execute shell commands, read and write files, search in files, and make HTTP requests.
+You can execute shell commands, read and write files, search the web, and make HTTP requests.
 Work in the project directory unless told otherwise.
-Be concise and practical. When using tools, explain briefly what you are doing.`
+Be concise and practical.
+
+Rules:
+- For ANY question about system state (disk usage, memory, CPU, processes, network, uptime) — use bash immediately. Never guess.
+- For file questions — use read_file or list_dir, not bash ls/cat.
+- For code searches — use grep.
+- When multiple independent tasks are needed — call several tools in one response.`
 
 // Fallback system prompt for models without native tool_calls
 const FALLBACK_SYSTEM_SUFFIX = `
