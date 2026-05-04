@@ -45,6 +45,7 @@
  *   AGENT_CONTEXT_TOKENS   Context window size for compression trigger
  */
 
+import './suppress-warnings' // must be first — suppresses DEP0040 punycode warning
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
