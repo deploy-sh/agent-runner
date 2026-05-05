@@ -1,10 +1,11 @@
 {
-  "name": "agent-runner",
+  "name": "giga-cli",
   "version": "0.4.5",
-  "description": "Standalone agentic loop CLI — any OpenAI-compatible LLM with tool calling",
+  "description": "GigaChat CLI — agentic loop for GigaChat and OpenAI-compatible LLMs",
   "main": "dist/main.js",
   "bin": {
-    "agent-runner": "dist/main.js"
+    "giga-cli": "dist/main.js",
+    "giga": "dist/main.js"
   },
   "scripts": {
     "build": "tsc",

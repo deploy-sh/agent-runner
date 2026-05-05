@@ -57,8 +57,9 @@ import { runRepl } from './repl'
 import { Config } from './types'
 import { runWizard } from './wizard'
 import { MCPClient } from './mcp-client'
+import { BRAND } from './brand'
 
-// Load .env from cwd or home
+// Load .env from cwd or home (~/.${BRAND.slug}/)
 function loadDotEnv(dir: string): void {
   const file = path.join(dir, '.env')
   if (!fs.existsSync(file)) return
@@ -71,7 +72,7 @@ function loadDotEnv(dir: string): void {
 }
 
 loadDotEnv(process.cwd())
-loadDotEnv(path.join(os.homedir(), '.agent-runner'))
+loadDotEnv(path.join(os.homedir(), '.' + BRAND.slug))
 
 function parseArgs(argv: string[]): { prompt: string; config: Partial<Config> } {
   const args = argv.slice(2)

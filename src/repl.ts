@@ -20,38 +20,72 @@ import {
 } from './loop'
 import { ToolCache } from './cache'
 import { MCPClient } from './mcp-client'
+import { BRAND } from './brand'
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 
-const VERSION = '0.4.4'
+const VERSION = BRAND.version
 
 // ─── ANSI colors (only when stdout is a real TTY, not piped) ─────────────────
 const tty = process.stdout.isTTY ?? false
 const C = {
-  model:  tty ? '\x1b[36m'  : '',  // cyan   — model output
-  prompt: tty ? '\x1b[33m'  : '',  // yellow — user prompt >
-  dim:    tty ? '\x1b[2m'   : '',  // dim    — tool calls / secondary info
-  reset:  tty ? '\x1b[0m'   : '',  // reset
+  brand:  tty ? '\x1b[1;36m' : '',  // bold cyan   — banner border & brand
+  model:  tty ? '\x1b[96m'   : '',  // bright cyan — model output (distinct from white user text)
+  prompt: tty ? '\x1b[33m'   : '',  // yellow      — user prompt ❯
+  dim:    tty ? '\x1b[2m'    : '',  // dim         — tool calls / secondary info
+  reset:  tty ? '\x1b[0m'    : '',  // reset
 }
 
 // System/command output — dim so it's visually distinct from LLM responses
 const ui = (s = '') => console.log(C.dim + s + C.reset)
 
-// ─── Banner ──────────────────────────────────────────────────────────────────
+// ─── Banner + startup display ─────────────────────────────────────────────────
 //
-// Uses only box-drawing chars (╔ ═ ║ ┌ ─ ┐ │ └ ┘) and ASCII printable chars.
-// Block elements (▄ █ ▀) are intentionally avoided: they render as double-width
-// in some terminals and CJK fonts, causing misalignment.
+// Two-column layout: brand box left, session info right.
+// Clears screen on start so the session begins with a clean terminal.
+// Uses only box-drawing chars (╔ ═ ║ ┌ ─ ┐ │ └ ┘) — no double-width block
+// elements (▄ █ ▀) which misalign in CJK/wide-char fonts.
 
-const BANNER = `
-╔══════════════════════════════════╗
-║                                  ║
-║    ┌──────────────────────┐      ║
-║    │   A G R U N  v${VERSION}  │      ║
-║    └──────────────────────┘      ║
-║                                  ║
-║  (c) korfix.info  by l_a_n_d     ║
-╚══════════════════════════════════╝`
+function showBanner(
+  config: Config,
+  sessionId: string,
+  mcpClient: MCPClient | null,
+  historyLength: number
+): void {
+  if (tty) process.stdout.write('\x1b[2J\x1b[H')
+
+  // Build banner label — pad to 20 chars so the box stays fixed-width
+  const label = `${BRAND.banner}  v${VERSION}`.padEnd(20)
+  const left = [
+    '╔══════════════════════════════════╗',
+    '║                                  ║',
+    '║    ┌──────────────────────┐      ║',
+    `║    │  ${label}  │      ║`,
+    '║    └──────────────────────┘      ║',
+    '║                                  ║',
+    `║  ${BRAND.copyright.padEnd(32)}║`,
+    '╚══════════════════════════════════╝',
+  ]
+
+  const right: string[] = [
+    '',
+    `  Model  : ${config.model}`,
+    `  Session: ${sessionId}`,
+    `  Dir    : ${config.projectRoot}`,
+  ]
+  if (mcpClient)         right.push(`  MCP    : ${config.mcpUrl}`)
+  if (config.useFallback) right.push(`  Mode   : fallback`)
+  if (historyLength > 0)  right.push(`  Loaded : ${historyLength} messages`)
+  right.push(`  Help   : /help`)
+
+  const rows = Math.max(left.length, right.length)
+  for (let i = 0; i < rows; i++) {
+    const l = C.brand + (left[i] ?? ' '.repeat(36)) + C.reset
+    const r = i < right.length ? C.dim + right[i] + C.reset : ''
+    console.log(l + r)
+  }
+  console.log()
+}
 
 // ─── Provider presets ─────────────────────────────────────────────────────────
 
@@ -62,13 +96,17 @@ interface Provider {
   envKey: string | null
 }
 
-const PROVIDERS: Provider[] = [
+// Base providers always available
+const BASE_PROVIDERS: Provider[] = [
   { name: 'OpenRouter', url: 'https://openrouter.ai/api/v1',   envKey: 'OPENROUTER_API_KEY' },
   { name: 'Groq',       url: 'https://api.groq.com/openai/v1', envKey: 'GROQ_API_KEY' },
   { name: 'Mistral',    url: 'https://api.mistral.ai/v1',       envKey: 'MISTRAL_API_KEY' },
   { name: 'OpenAI',     url: 'https://api.openai.com/v1',       envKey: 'OPENAI_API_KEY' },
   { name: 'Ollama',     url: 'http://localhost:11434/v1',        envKey: null },
 ]
+
+// Fork-specific providers prepended (from brand.ts)
+const PROVIDERS: Provider[] = [...BRAND.extraProviders, ...BASE_PROVIDERS]
 
 // ─── Model picker ─────────────────────────────────────────────────────────────
 
@@ -169,18 +207,14 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     terminal: true
   })
 
-  // Banner + session info
-  console.log(BANNER)
-  console.log(`  Model  : ${config.model}`)
-  console.log(`  Session: ${sessionId}`)
-  console.log(`  Dir    : ${config.projectRoot}`)
-  if (mcpClient) console.log(`  MCP    : ${config.mcpUrl}`)
-  if (config.useFallback) console.log(`  Mode   : fallback (prompt-based tools)`)
-  if (history.length > 0) console.log(`  Loaded : ${history.length} messages`)
-  console.log(`  Help   : /help\n`)
+  // Banner + session info (two-column layout, clears screen)
+  showBanner(config, sessionId, mcpClient, history.length)
+
+  // Separator line for main input prompt (60 dashes, dim)
+  const SEP = tty ? C.dim + '─'.repeat(60) + C.reset + '\n' : ''
 
   // Prompt helper — waits for one line of input
-  const ask = (prompt = `${C.prompt}>${C.reset} `) =>
+  const ask = (prompt = `${C.prompt}❯${C.reset} `) =>
     new Promise<string>((resolve) => {
       process.stdout.write(prompt)
       rl.once('line', resolve)
@@ -199,6 +233,7 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
   while (true) {
     let input: string
     try {
+      process.stdout.write(SEP)
       input = (await ask()).trim()
     } catch {
       break
@@ -366,9 +401,11 @@ export async function runRepl(config: Config, mcpClient: MCPClient | null = null
     messages.push({ role: 'user', content: input })
 
     try {
-      process.stdout.write('\n' + C.model)
+      // ◆ marks the start of the agent's turn; bright cyan persists through streaming
+      process.stdout.write('\n' + C.model + '◆ ')
       messages = await runTurn(client, messages, config, cache, mcpClient)
-      process.stdout.write(C.reset + '\n')
+      // Extra \n gives blank line between agent response and next input separator
+      process.stdout.write(C.reset + '\n\n')
 
       // Save session after every turn so Ctrl+C doesn't lose history
       const toSave = messages.filter(m => m.role !== 'system')
